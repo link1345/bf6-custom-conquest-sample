@@ -1,27 +1,43 @@
 import * as modlib from "modlib";
 
+// Team IDs used by Portal. Change these only if your experience uses custom team routing.
 const TEAM_1_ID = 1;
 const TEAM_2_ID = 2;
 const NEUTRAL_TEAM_ID = 0;
 
+// Object ID layout used by the original visual script.
+// Capture points are expected to start at 200: A=200, B=201, C=202, and so on.
 const CAPTURE_POINT_BASE_ID = 200;
+// Vehicle spawners are expected in pairs per objective: 600/601 for A, 610/611 for B, etc.
 const VEHICLE_SPAWNER_BASE_ID = 600;
+// AI spawner IDs for each team. These must match spawners placed in the Portal experience.
 const AI_SPAWNER_TEAM_1 = 901;
 const AI_SPAWNER_TEAM_2 = 902;
 
+// Default ticket count for normal Conquest.
 const STARTING_TICKETS = 1500;
+// Ticket counts used when conquestAssault is enabled.
 const ASSAULT_ATTACKER_TICKETS = 2000;
 const ASSAULT_DEFENDER_TICKETS = 1500;
+// Keep this higher than the ticket scores so Portal's built-in score win condition does not end the match immediately.
 const GAME_MODE_TARGET_SCORE = 10000;
+// Match length in seconds.
 const TIME_LIMIT_SECONDS = 2700;
+// Starts near-end music when either team reaches this ticket count.
 const LOW_TICKET_MUSIC_THRESHOLD = 100;
+// How often ticket bleed is applied, in seconds.
 const TICKET_BLEED_INTERVAL_SECONDS = 2;
+// Extra ticket loss when one team controls every objective.
 const TOTAL_CONTROL_BONUS = 10;
+// Capture and neutralization times for every objective, in seconds.
 const FLAG_CAPTURE_TIME_SECONDS = 15;
 const FLAG_NEUTRAL_TIME_SECONDS = 20;
+// Custom AI is disabled by default because Portal can throw OutOfAISpawnQuota when the server already has AI.
 const MAX_CUSTOM_AI = 36;
+// Scoreboard column index used for sorting. Column 1 is Score.
 const SCOREBOARD_SORT_COLUMN = 1;
 
+// HUD colors. The first vector is text/bar color, the second is the background color.
 const TEAM_1_TEXT = () => mod.CreateVector(0, 0.8, 1);
 const TEAM_1_BG = () => mod.CreateVector(0, 0.2, 0.5);
 const TEAM_2_TEXT = () => mod.CreateVector(1, 0.2, 0.2);
@@ -29,6 +45,7 @@ const TEAM_2_BG = () => mod.CreateVector(0.6, 0.1, 0.1);
 const WHITE = () => mod.CreateVector(1, 1, 1);
 const BLACK = () => mod.CreateVector(0, 0, 0);
 
+// Objective labels shown in the top HUD. Add more letters if your map has more than 26 capture points.
 const FLAG_LETTERS = [
     "A",
     "B",
@@ -136,6 +153,7 @@ const state: ConquestState = {
     aiSpawnBlocked: false,
 };
 
+// Runtime player state for the current match. This replaces Portal variables for values that do not need persistence.
 const playerStates = new Map<number, PlayerState>();
 
 function defaultPlayerState(): PlayerState {
@@ -304,6 +322,7 @@ function portalArrayValue<T>(array: mod.Array, index: number): T {
     return modlib.ConvertArray(array)[index] as T;
 }
 
+// Counts objectives owned by a team. Ticket bleed is based on this value.
 function countOwnedCapturePoints(owner: mod.Team): number {
     const points = mod.AllCapturePoints();
     let owned = 0;
@@ -316,6 +335,7 @@ function countOwnedCapturePoints(owner: mod.Team): number {
     return owned;
 }
 
+// Counts players from one team on a capture point for the player objective HUD.
 function countPlayersOnPoint(point: mod.CapturePoint, owner: mod.Team): number {
     const players = mod.GetPlayersOnPoint(point);
     let count = 0;
@@ -430,6 +450,7 @@ function scoreRootName(teamValue: mod.Team): string {
     return widgetName(["ConquestHUD", teamValue, "Root"]);
 }
 
+// Creates the team-restricted top HUD. Each team gets its own copy so friendly/enemy colors can be flipped.
 function createTeamHud(teamValue: mod.Team): void {
     const rootName = scoreRootName(teamValue);
     if (mod.HasUIWidgetWithName(rootName)) mod.DeleteUIWidget(find(rootName));
@@ -532,6 +553,7 @@ function objectiveProgressColorForTeam(teamValue: mod.Team, point: mod.CapturePo
     return TEAM_2_TEXT();
 }
 
+// Updates one team's view of scores, ticket bars, timer, and objective icons.
 function updateTeamHud(teamValue: mod.Team): void {
     const friendly = getTeamScore(teamValue);
     const enemy = getTeamScore(otherTeam(teamValue));
@@ -548,6 +570,7 @@ function updateTeamHud(teamValue: mod.Team): void {
     updateObjectiveHud(teamValue);
 }
 
+// Keeps objective letters and small capture-progress bars in sync with the current capture state.
 function updateObjectiveHud(teamValue: mod.Team): void {
     const points = mod.AllCapturePoints();
     const total = Math.max(1, countPortalArray(points));
@@ -615,6 +638,7 @@ function updateAllHud(): void {
     updateTeamHud(team(TEAM_2_ID));
 }
 
+// Applies capture timing and enables each objective for the game mode.
 function setupCapturePoint(point: mod.CapturePoint): void {
     mod.SetCapturePointCapturingTime(point, FLAG_CAPTURE_TIME_SECONDS);
     mod.SetCapturePointNeutralizationTime(point, FLAG_NEUTRAL_TIME_SECONDS);
@@ -628,6 +652,7 @@ function setupAllCapturePoints(): void {
     for (let i = 0; i < countPortalArray(points); i += 1) setupCapturePoint(portalArrayValue<mod.CapturePoint>(points, i));
 }
 
+// Resets all match-scoped state. Customizers can change feature flags here.
 function initializeConquestState(): void {
     playerStates.clear();
     state.initialized = true;
@@ -673,6 +698,9 @@ function startConquest(): void {
     state.gameOngoing = true;
 }
 
+// Applies the ticket bleed rules:
+// - a full-control bonus when one team owns every objective
+// - a loser-only bleed based on the objective ownership difference
 function bleedTickets(): void {
     const team1Owned = countOwnedCapturePoints(team(TEAM_1_ID));
     const team2Owned = countOwnedCapturePoints(team(TEAM_2_ID));
@@ -687,6 +715,7 @@ function bleedTickets(): void {
     }
 }
 
+// Runs ticket bleed at a fixed interval without relying on async waits.
 function maybeBleedTickets(): void {
     if (!state.gameOngoing) return;
 
@@ -701,6 +730,7 @@ function maybeBleedTickets(): void {
     checkEndGame();
 }
 
+// Refreshes the HUD once per elapsed second.
 function maybeRefreshHud(): void {
     if (!state.gameOngoing) return;
 
@@ -710,6 +740,7 @@ function maybeRefreshHud(): void {
     updateAllHud();
 }
 
+// Triggers the low-ticket music only once per match.
 function maybeTriggerLowTicketMusic(): void {
     if (state.lowMusicTriggered) return;
     if (getTeamScore(team(TEAM_1_ID)) > LOW_TICKET_MUSIC_THRESHOLD && getTeamScore(team(TEAM_2_ID)) > LOW_TICKET_MUSIC_THRESHOLD) return;
@@ -718,12 +749,14 @@ function maybeTriggerLowTicketMusic(): void {
     mod.PlayMusic(mod.MusicEvents.Core_Overtime_Loop);
 }
 
+// Ends the match when time runs out or either team's tickets reach zero.
 function checkEndGame(): void {
     if (!state.gameOngoing || state.endGameStarted) return;
     if (mod.GetMatchTimeRemaining() > 1 && getTeamScore(team(TEAM_1_ID)) > 0 && getTeamScore(team(TEAM_2_ID)) > 0) return;
     endConquest();
 }
 
+// Finalizes the round and chooses the winning team from remaining tickets.
 function endConquest(): void {
     state.endGameStarted = true;
     state.gameOngoing = false;
@@ -746,6 +779,7 @@ function endConquest(): void {
     }
 }
 
+// Enables the vehicle spawner pair that belongs to the team currently holding this objective.
 function updateVehicleSpawnerForPoint(point: mod.CapturePoint): void {
     if (!state.enableVehicleSpawns) return;
 
@@ -759,6 +793,7 @@ function updateVehicleSpawnerForPoint(point: mod.CapturePoint): void {
     mod.SetVehicleSpawnerAutoSpawn(team2Spawner, mod.Equals(owner, team(TEAM_2_ID)));
 }
 
+// Awards capture score to every valid player on the newly captured objective.
 function awardCapturePlayers(point: mod.CapturePoint): void {
     const owner = mod.GetCurrentOwnerTeam(point);
     const players = mod.GetPlayersOnPoint(point);
@@ -770,6 +805,7 @@ function awardCapturePlayers(point: mod.CapturePoint): void {
     }
 }
 
+// Plays the objective captured VO for the owning team.
 function playCaptureVO(point: mod.CapturePoint): void {
     if (!state.enableVO) return;
     const owner = mod.GetCurrentOwnerTeam(point);
@@ -828,6 +864,7 @@ function setPlayerOobVisible(player: mod.Player, visible: boolean): void {
     }
 }
 
+// Updates the per-player capture HUD that appears while standing inside an objective.
 function updatePlayerCaptureHud(player: mod.Player, point: mod.CapturePoint): void {
     const progress = mod.GetCaptureProgress(point);
     const width = Math.max(2, Math.floor(220 * progress));
@@ -848,6 +885,7 @@ function updatePlayerCaptureHud(player: mod.Player, point: mod.CapturePoint): vo
     playerState(player).lastCaptureProgress = progress;
 }
 
+// Converts the current objective state into the player-facing label.
 function captureStatusLabel(player: mod.Player, point: mod.CapturePoint): string {
     const owner = mod.GetCurrentOwnerTeam(point);
     const progress = mod.GetCaptureProgress(point);
@@ -859,6 +897,7 @@ function captureStatusLabel(player: mod.Player, point: mod.CapturePoint): string
     return "LOSING";
 }
 
+// Optional custom AI spawner. Disabled by default and blocked after the first quota failure.
 function maybeRunAI(): void {
     if (!state.enableCustomAI || state.aiSpawnBlocked) return;
 
@@ -900,6 +939,7 @@ function countTeamPlayers(players: mod.Array, teamValue: mod.Team): number {
     return count;
 }
 
+// Picks an enemy or neutral objective for AI movement. Falls back to the first point when all are friendly.
 function chooseNearestObjective(player: mod.Player): mod.CapturePoint {
     const points = mod.AllCapturePoints();
     let selected = portalArrayValue<mod.CapturePoint>(points, 0);
@@ -919,6 +959,7 @@ function chooseNearestObjective(player: mod.Player): mod.CapturePoint {
     return selected;
 }
 
+// Sends AI toward an objective after deploy, capture-point entry, vehicle exit, or move failure.
 function sendAIToObjective(player: mod.Player): void {
     if (!mod.IsPlayerValid(player) || !mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) return;
     const objective = chooseNearestObjective(player);
@@ -926,6 +967,7 @@ function sendAIToObjective(player: mod.Player): void {
     mod.AIMoveToBehavior(player, mod.GetObjectPosition(objective));
 }
 
+// Conquest Assault support: defenders lose when team 2 owns no objectives.
 function checkConquestAssaultWin(): void {
     if (!state.conquestAssault) return;
     if (countOwnedCapturePoints(team(TEAM_2_ID)) > 0) return;
@@ -942,11 +984,13 @@ export function OngoingGlobal(): void {
     checkEndGame();
 }
 
+// Portal event: called when the game mode starts.
 export function OnGameModeStarted(): void {
     initializeConquestState();
     startConquest();
 }
 
+// Portal event: creates per-player HUD and initializes scoreboard values.
 export function OnPlayerJoinGame(eventPlayer: mod.Player): void {
     initializePlayerState(eventPlayer);
     createPlayerHud(eventPlayer);
@@ -954,6 +998,7 @@ export function OnPlayerJoinGame(eventPlayer: mod.Player): void {
     if (state.gameOngoing) updateAllHud();
 }
 
+// Portal event: resets temporary player state and gives optional NVG equipment.
 export function OnPlayerDeployed(eventPlayer: mod.Player): void {
     const current = playerState(eventPlayer);
     current.onPoint = false;
@@ -962,6 +1007,7 @@ export function OnPlayerDeployed(eventPlayer: mod.Player): void {
     sendAIToObjective(eventPlayer);
 }
 
+// Portal event: applies death ticket bleed and updates death stats.
 export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Player, _eventDeathType: mod.DeathType, _eventWeaponUnlock: mod.WeaponUnlock): void {
     void _eventDeathType;
     void _eventWeaponUnlock;
@@ -973,6 +1019,7 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
     checkEndGame();
 }
 
+// Portal event: awards score and kill count for enemy kills.
 export function OnPlayerEarnedKill(eventPlayer: mod.Player, eventOtherPlayer: mod.Player, _eventDeathType: mod.DeathType, _eventWeaponUnlock: mod.WeaponUnlock): void {
     void _eventDeathType;
     void _eventWeaponUnlock;
@@ -980,17 +1027,20 @@ export function OnPlayerEarnedKill(eventPlayer: mod.Player, eventOtherPlayer: mo
     addPlayerScore(eventPlayer, 20, PlayerVar.Kills);
 }
 
+// Portal event: awards assist score for enemy kill assists.
 export function OnPlayerEarnedKillAssist(eventPlayer: mod.Player, eventOtherPlayer: mod.Player): void {
     if (mod.Equals(mod.GetTeam(eventPlayer), mod.GetTeam(eventOtherPlayer))) return;
     addPlayerScore(eventPlayer, 10, PlayerVar.Assists);
 }
 
+// Portal event: awards revive score to the reviving player.
 export function OnRevived(eventPlayer: mod.Player, eventOtherPlayer: mod.Player): void {
     if (!mod.IsPlayerValid(eventOtherPlayer)) return;
     addPlayerScore(eventOtherPlayer, 20, PlayerVar.Revives);
     updatePlayerScoreboard(eventPlayer);
 }
 
+// Portal event: awards capture score, updates vehicle spawns, and refreshes HUD.
 export function OnCapturePointCaptured(eventCapturePoint: mod.CapturePoint): void {
     awardCapturePlayers(eventCapturePoint);
     updateVehicleSpawnerForPoint(eventCapturePoint);
@@ -999,11 +1049,13 @@ export function OnCapturePointCaptured(eventCapturePoint: mod.CapturePoint): voi
     checkConquestAssaultWin();
 }
 
+// Portal event: plays the "objective capturing" VO when capture progress starts.
 export function OnCapturePointCapturing(eventCapturePoint: mod.CapturePoint): void {
     if (!state.enableVO) return;
     mod.PlayVO(mod.SpawnObject(mod.RuntimeSpawn_Common.SFX_VOModule_OneShot2D, mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0)), mod.VoiceOverEvents2D.ObjectiveCapturing, voiceOverFlag(eventCapturePoint), mod.GetOwnerProgressTeam(eventCapturePoint));
 }
 
+// Portal event: continuously updates player and team objective HUD while a point is active.
 export function OngoingCapturePoint(eventCapturePoint: mod.CapturePoint): void {
     const players = mod.GetPlayersOnPoint(eventCapturePoint);
     for (let i = 0; i < countPortalArray(players); i += 1) {
@@ -1014,6 +1066,7 @@ export function OngoingCapturePoint(eventCapturePoint: mod.CapturePoint): void {
     updateObjectiveHud(team(TEAM_2_ID));
 }
 
+// Portal event: shows the player capture HUD when entering an objective.
 export function OnPlayerEnterCapturePoint(eventPlayer: mod.Player, eventCapturePoint: mod.CapturePoint): void {
     const current = playerState(eventPlayer);
     current.onPoint = true;
@@ -1024,6 +1077,7 @@ export function OnPlayerEnterCapturePoint(eventPlayer: mod.Player, eventCaptureP
     sendAIToObjective(eventPlayer);
 }
 
+// Portal event: hides the player capture HUD when leaving an objective.
 export function OnPlayerExitCapturePoint(eventPlayer: mod.Player, _eventCapturePoint: mod.CapturePoint): void {
     void _eventCapturePoint;
     const current = playerState(eventPlayer);
@@ -1033,6 +1087,7 @@ export function OnPlayerExitCapturePoint(eventPlayer: mod.Player, _eventCaptureP
     setPlayerObjectiveVisible(eventPlayer, false);
 }
 
+// Portal event: optional team switching through interact points with IDs 1 and 2.
 export function OnPlayerInteract(eventPlayer: mod.Player, eventInteractPoint: mod.InteractPoint): void {
     if (!state.enableTeamSwitching) return;
     const id = mod.GetObjId(eventInteractPoint);
@@ -1040,6 +1095,7 @@ export function OnPlayerInteract(eventPlayer: mod.Player, eventInteractPoint: mo
     if (id === TEAM_2_ID) mod.SetTeam(eventPlayer, team(TEAM_2_ID));
 }
 
+// Portal event: shows the out-of-bounds warning UI when enabled.
 export function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, _eventAreaTrigger: mod.AreaTrigger): void {
     void _eventAreaTrigger;
     const current = playerState(eventPlayer);
@@ -1048,12 +1104,14 @@ export function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, _eventAreaTrig
     setPlayerOobVisible(eventPlayer, true);
 }
 
+// Portal event: hides the out-of-bounds warning UI.
 export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, _eventAreaTrigger: mod.AreaTrigger): void {
     void _eventAreaTrigger;
     playerState(eventPlayer).outOfBounds = false;
     setPlayerOobVisible(eventPlayer, false);
 }
 
+// Portal event: makes damaged AI focus the attacker.
 export function OnPlayerDamaged(eventPlayer: mod.Player, eventOtherPlayer: mod.Player, _eventDamageType: mod.DamageType, _eventWeaponUnlock: mod.WeaponUnlock): void {
     void _eventDamageType;
     void _eventWeaponUnlock;
@@ -1064,16 +1122,19 @@ export function OnPlayerDamaged(eventPlayer: mod.Player, eventOtherPlayer: mod.P
     }
 }
 
+// Portal event: returns AI to battlefield behavior when entering a vehicle.
 export function OnPlayerEnterVehicle(eventPlayer: mod.Player, _eventVehicle: mod.Vehicle): void {
     void _eventVehicle;
     if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) mod.AIBattlefieldBehavior(eventPlayer);
 }
 
+// Portal event: sends AI back toward an objective after leaving a vehicle.
 export function OnPlayerExitVehicle(eventPlayer: mod.Player, _eventVehicle: mod.Vehicle): void {
     void _eventVehicle;
     sendAIToObjective(eventPlayer);
 }
 
+// Portal event: retries objective movement when AI pathing fails.
 export function OnAIMoveToFailed(eventPlayer: mod.Player): void {
     sendAIToObjective(eventPlayer);
 }
