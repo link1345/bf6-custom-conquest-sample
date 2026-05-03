@@ -1,11 +1,16 @@
 
-# TypeScript Sample Template Program for Battlefield 6 Rule Editor
+# Custom Conquest Template for Battlefield 6 Rule Editor
 
 [※ このリポジトリの日本語での説明はこちらです。](./README-JP.md)
 
-This repository is designed to make it easier to write Battlefield (BF) Rule Editor scripts in TypeScript.
+This program is a TypeScript version of Andy's visual script for the Custom Conquest Template.
 
-It provides the following features:
+Original experience:
+https://bfportal.gg/experiences/custom-conquest-template/
+
+This repository is based on a TypeScript workflow for Battlefield (BF) Rule Editor scripts.
+
+It provides the following development features:
 
 
 * When you push to GitHub, ESLint automatically checks your code syntax.
