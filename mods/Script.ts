@@ -12,6 +12,7 @@ const AI_SPAWNER_TEAM_2 = 902;
 const STARTING_TICKETS = 1500;
 const ASSAULT_ATTACKER_TICKETS = 2000;
 const ASSAULT_DEFENDER_TICKETS = 1500;
+const GAME_MODE_TARGET_SCORE = 10000;
 const TIME_LIMIT_SECONDS = 2700;
 const LOW_TICKET_MUSIC_THRESHOLD = 100;
 const TICKET_BLEED_INTERVAL_SECONDS = 2;
@@ -57,26 +58,6 @@ const FLAG_LETTERS = [
     "Z",
 ];
 
-const enum GlobalVar {
-    GameOngoing = 0,
-    Team1Score = 1,
-    Team2Score = 2,
-    Team1StartingScore = 3,
-    Team2StartingScore = 4,
-    LastTicketBleedTick = 5,
-    LastHudTick = 6,
-    LowMusicTriggered = 7,
-    EnableCustomAI = 8,
-    EnableTeamSwitching = 9,
-    EnableVO = 10,
-    EnableOOB = 11,
-    EnableVehicleSpawns = 12,
-    GivePlayersNVG = 13,
-    ConquestAssault = 14,
-    LastAITick = 15,
-    EndGameStarted = 16,
-}
-
 const enum PlayerVar {
     Score = 0,
     Kills = 1,
@@ -94,12 +75,95 @@ const enum PlayerVar {
     AIInAction = 13,
 }
 
-function g(slot: GlobalVar): mod.Variable {
-    return mod.GlobalVariable(slot);
+type PlayerState = {
+    score: number;
+    kills: number;
+    deaths: number;
+    assists: number;
+    captures: number;
+    revives: number;
+    onPoint: boolean;
+    currentCapturePointId: number;
+    lastCaptureProgress: number;
+    captureTick: number;
+    outOfBounds: boolean;
+    ignoreOOB: boolean;
+    aiTarget?: mod.Player;
+    aiInAction: boolean;
+};
+
+type ConquestState = {
+    initialized: boolean;
+    gameOngoing: boolean;
+    team1Score: number;
+    team2Score: number;
+    team1StartingScore: number;
+    team2StartingScore: number;
+    lastTicketBleedTick: number;
+    lastHudTick: number;
+    lowMusicTriggered: boolean;
+    enableCustomAI: boolean;
+    enableTeamSwitching: boolean;
+    enableVO: boolean;
+    enableOOB: boolean;
+    enableVehicleSpawns: boolean;
+    givePlayersNVG: boolean;
+    conquestAssault: boolean;
+    lastAITick: number;
+    endGameStarted: boolean;
+    aiSpawnBlocked: boolean;
+};
+
+const state: ConquestState = {
+    initialized: false,
+    gameOngoing: false,
+    team1Score: STARTING_TICKETS,
+    team2Score: STARTING_TICKETS,
+    team1StartingScore: STARTING_TICKETS,
+    team2StartingScore: STARTING_TICKETS,
+    lastTicketBleedTick: -1,
+    lastHudTick: -1,
+    lowMusicTriggered: false,
+    enableCustomAI: false,
+    enableTeamSwitching: true,
+    enableVO: true,
+    enableOOB: true,
+    enableVehicleSpawns: true,
+    givePlayersNVG: false,
+    conquestAssault: false,
+    lastAITick: -1,
+    endGameStarted: false,
+    aiSpawnBlocked: false,
+};
+
+const playerStates = new Map<number, PlayerState>();
+
+function defaultPlayerState(): PlayerState {
+    return {
+        score: 0,
+        kills: 0,
+        deaths: 0,
+        assists: 0,
+        captures: 0,
+        revives: 0,
+        onPoint: false,
+        currentCapturePointId: -1,
+        lastCaptureProgress: 0,
+        captureTick: 0,
+        outOfBounds: false,
+        ignoreOOB: false,
+        aiInAction: false,
+    };
 }
 
-function pv(player: mod.Player, slot: PlayerVar): mod.Variable {
-    return mod.ObjectVariable(player, slot);
+function playerState(player: mod.Player): PlayerState {
+    const id = mod.GetObjId(player);
+    let current = playerStates.get(id);
+    if (current === undefined) {
+        current = defaultPlayerState();
+        playerStates.set(id, current);
+    }
+    return current;
 }
 
 function team(id: number): mod.Team {
@@ -118,21 +182,17 @@ function otherTeam(teamValue: mod.Team): mod.Team {
     return team(otherTeamId(teamId(teamValue)));
 }
 
-function teamScoreVar(teamValue: mod.Team): mod.Variable {
-    return teamId(teamValue) === TEAM_1_ID ? g(GlobalVar.Team1Score) : g(GlobalVar.Team2Score);
-}
-
-function teamStartingScoreVar(teamValue: mod.Team): mod.Variable {
-    return teamId(teamValue) === TEAM_1_ID ? g(GlobalVar.Team1StartingScore) : g(GlobalVar.Team2StartingScore);
-}
-
 function getTeamScore(teamValue: mod.Team): number {
-    return mod.GetVariable(teamScoreVar(teamValue)) as number;
+    return teamId(teamValue) === TEAM_1_ID ? state.team1Score : state.team2Score;
 }
 
 function setTeamScore(teamValue: mod.Team, score: number): void {
     const clamped = Math.max(0, Math.floor(score));
-    mod.SetVariable(teamScoreVar(teamValue), clamped);
+    if (teamId(teamValue) === TEAM_1_ID) {
+        state.team1Score = clamped;
+    } else {
+        state.team2Score = clamped;
+    }
     mod.SetGameModeScore(teamValue, clamped);
 }
 
@@ -141,7 +201,7 @@ function addTeamScore(teamValue: mod.Team, delta: number): void {
 }
 
 function getStartingScore(teamValue: mod.Team): number {
-    return mod.GetVariable(teamStartingScoreVar(teamValue)) as number;
+    return teamId(teamValue) === TEAM_1_ID ? state.team1StartingScore : state.team2StartingScore;
 }
 
 function widgetName(parts: Array<string | number | mod.Player | mod.Team | mod.CapturePoint>): string {
@@ -278,29 +338,63 @@ function flagLetter(point: mod.CapturePoint): string {
 }
 
 function playerScore(player: mod.Player, slot: PlayerVar): number {
-    return (mod.GetVariable(pv(player, slot)) as number) || 0;
+    const current = playerState(player);
+    switch (slot) {
+        case PlayerVar.Kills:
+            return current.kills;
+        case PlayerVar.Deaths:
+            return current.deaths;
+        case PlayerVar.Assists:
+            return current.assists;
+        case PlayerVar.Captures:
+            return current.captures;
+        case PlayerVar.Revives:
+            return current.revives;
+        default:
+            return current.score;
+    }
+}
+
+function addPlayerSlot(player: mod.Player, slot: PlayerVar): void {
+    const current = playerState(player);
+    switch (slot) {
+        case PlayerVar.Kills:
+            current.kills += 1;
+            break;
+        case PlayerVar.Deaths:
+            current.deaths += 1;
+            break;
+        case PlayerVar.Assists:
+            current.assists += 1;
+            break;
+        case PlayerVar.Captures:
+            current.captures += 1;
+            break;
+        case PlayerVar.Revives:
+            current.revives += 1;
+            break;
+        default:
+            break;
+    }
 }
 
 function addPlayerScore(player: mod.Player, scoreDelta: number, slot?: PlayerVar): void {
-    mod.SetVariable(pv(player, PlayerVar.Score), playerScore(player, PlayerVar.Score) + scoreDelta);
-    if (slot !== undefined) mod.SetVariable(pv(player, slot), playerScore(player, slot) + 1);
+    const current = playerState(player);
+    current.score += scoreDelta;
+    if (slot !== undefined) addPlayerSlot(player, slot);
     updatePlayerScoreboard(player);
 }
 
 function initializePlayerState(player: mod.Player): void {
-    mod.SetVariable(pv(player, PlayerVar.Score), playerScore(player, PlayerVar.Score));
-    mod.SetVariable(pv(player, PlayerVar.Kills), playerScore(player, PlayerVar.Kills));
-    mod.SetVariable(pv(player, PlayerVar.Deaths), playerScore(player, PlayerVar.Deaths));
-    mod.SetVariable(pv(player, PlayerVar.Assists), playerScore(player, PlayerVar.Assists));
-    mod.SetVariable(pv(player, PlayerVar.Captures), playerScore(player, PlayerVar.Captures));
-    mod.SetVariable(pv(player, PlayerVar.Revives), playerScore(player, PlayerVar.Revives));
-    mod.SetVariable(pv(player, PlayerVar.OnPoint), false);
-    mod.SetVariable(pv(player, PlayerVar.CurrentCapturePointId), -1);
-    mod.SetVariable(pv(player, PlayerVar.LastCaptureProgress), 0);
-    mod.SetVariable(pv(player, PlayerVar.CaptureTick), 0);
-    mod.SetVariable(pv(player, PlayerVar.OutOfBounds), false);
-    mod.SetVariable(pv(player, PlayerVar.IgnoreOOB), false);
-    mod.SetVariable(pv(player, PlayerVar.AIInAction), false);
+    const current = playerState(player);
+    current.onPoint = false;
+    current.currentCapturePointId = -1;
+    current.lastCaptureProgress = 0;
+    current.captureTick = 0;
+    current.outOfBounds = false;
+    current.ignoreOOB = false;
+    current.aiTarget = undefined;
+    current.aiInAction = false;
 }
 
 function setupScoreboard(): void {
@@ -449,9 +543,11 @@ function updateTeamHud(teamValue: mod.Team): void {
 
 function updateObjectiveHud(teamValue: mod.Team): void {
     const points = mod.AllCapturePoints();
+    const total = Math.max(1, countPortalArray(points));
 
-    for (let i = 0; i < countPortalArray(points); i += 1) {
+    for (let i = 0; i < total; i += 1) {
         const point = portalArrayValue<mod.CapturePoint>(points, i);
+        const x = (i - (total - 1) / 2) * 50;
         setTextIfPresent(objectiveWidgetName(teamValue, point, "Text"), message(flagLetter(point)));
         setWidgetColorIfPresent(objectiveWidgetName(teamValue, point, "Text"), objectiveBgColorForTeam(teamValue, point));
         setTextColorIfPresent(objectiveWidgetName(teamValue, point, "Text"), objectiveTextColorForTeam(teamValue, point));
@@ -459,7 +555,7 @@ function updateObjectiveHud(teamValue: mod.Team): void {
         setSizeAndPositionIfPresent(
             objectiveWidgetName(teamValue, point, "Progress"),
             mod.CreateVector(Math.max(2, Math.floor(30 * mod.GetCaptureProgress(point))), 5, 0),
-            mod.GetUIWidgetPosition(find(objectiveWidgetName(teamValue, point, "Progress"))),
+            mod.CreateVector(x, 122, 0),
         );
     }
 }
@@ -519,26 +615,29 @@ function setupAllCapturePoints(): void {
 }
 
 function initializeConquestState(): void {
-    mod.SetVariable(g(GlobalVar.GameOngoing), false);
-    mod.SetVariable(g(GlobalVar.EnableCustomAI), true);
-    mod.SetVariable(g(GlobalVar.EnableTeamSwitching), true);
-    mod.SetVariable(g(GlobalVar.EnableVO), true);
-    mod.SetVariable(g(GlobalVar.EnableOOB), true);
-    mod.SetVariable(g(GlobalVar.EnableVehicleSpawns), true);
-    mod.SetVariable(g(GlobalVar.GivePlayersNVG), false);
-    mod.SetVariable(g(GlobalVar.ConquestAssault), false);
-    mod.SetVariable(g(GlobalVar.LastTicketBleedTick), -1);
-    mod.SetVariable(g(GlobalVar.LastHudTick), -1);
-    mod.SetVariable(g(GlobalVar.LastAITick), -1);
-    mod.SetVariable(g(GlobalVar.LowMusicTriggered), false);
-    mod.SetVariable(g(GlobalVar.EndGameStarted), false);
+    playerStates.clear();
+    state.initialized = true;
+    state.gameOngoing = false;
+    state.enableCustomAI = false;
+    state.enableTeamSwitching = true;
+    state.enableVO = true;
+    state.enableOOB = true;
+    state.enableVehicleSpawns = true;
+    state.givePlayersNVG = false;
+    state.conquestAssault = false;
+    state.lastTicketBleedTick = -1;
+    state.lastHudTick = -1;
+    state.lastAITick = -1;
+    state.lowMusicTriggered = false;
+    state.endGameStarted = false;
+    state.aiSpawnBlocked = false;
 
-    if (mod.GetVariable(g(GlobalVar.ConquestAssault))) {
-        mod.SetVariable(g(GlobalVar.Team1StartingScore), ASSAULT_ATTACKER_TICKETS);
-        mod.SetVariable(g(GlobalVar.Team2StartingScore), ASSAULT_DEFENDER_TICKETS);
+    if (state.conquestAssault) {
+        state.team1StartingScore = ASSAULT_ATTACKER_TICKETS;
+        state.team2StartingScore = ASSAULT_DEFENDER_TICKETS;
     } else {
-        mod.SetVariable(g(GlobalVar.Team1StartingScore), STARTING_TICKETS);
-        mod.SetVariable(g(GlobalVar.Team2StartingScore), STARTING_TICKETS);
+        state.team1StartingScore = STARTING_TICKETS;
+        state.team2StartingScore = STARTING_TICKETS;
     }
 
     setTeamScore(team(TEAM_1_ID), getStartingScore(team(TEAM_1_ID)));
@@ -547,7 +646,7 @@ function initializeConquestState(): void {
 
 function startConquest(): void {
     mod.SetGameModeTimeLimit(TIME_LIMIT_SECONDS);
-    mod.SetGameModeTargetScore(1);
+    mod.SetGameModeTargetScore(GAME_MODE_TARGET_SCORE);
     mod.SetVehicleCategoryAllowedInSurroundingArea(mod.VehicleCategories.Air_All, true);
     mod.SetUnspawnDelayInSeconds(mod.GetSpawner(AI_SPAWNER_TEAM_1), 300);
     mod.SetUnspawnDelayInSeconds(mod.GetSpawner(AI_SPAWNER_TEAM_2), 300);
@@ -557,7 +656,7 @@ function startConquest(): void {
     createTeamHud(team(TEAM_2_ID));
     mod.LoadMusic(mod.MusicPackages.Core);
     mod.PlayMusic(mod.MusicEvents.Core_LastPhaseBegin);
-    mod.SetVariable(g(GlobalVar.GameOngoing), true);
+    state.gameOngoing = true;
 }
 
 function bleedTickets(): void {
@@ -585,13 +684,13 @@ function flashBleedingTeam(bleedingTeam: mod.Team): void {
 }
 
 function maybeBleedTickets(): void {
-    if (!mod.GetVariable(g(GlobalVar.GameOngoing))) return;
+    if (!state.gameOngoing) return;
 
     const elapsed = Math.floor(mod.GetMatchTimeElapsed());
     const currentTick = Math.floor(elapsed / TICKET_BLEED_INTERVAL_SECONDS);
-    if (currentTick === mod.GetVariable(g(GlobalVar.LastTicketBleedTick))) return;
+    if (currentTick === state.lastTicketBleedTick) return;
 
-    mod.SetVariable(g(GlobalVar.LastTicketBleedTick), currentTick);
+    state.lastTicketBleedTick = currentTick;
     bleedTickets();
     maybeTriggerLowTicketMusic();
     updateAllHud();
@@ -599,31 +698,31 @@ function maybeBleedTickets(): void {
 }
 
 function maybeRefreshHud(): void {
-    if (!mod.GetVariable(g(GlobalVar.GameOngoing))) return;
+    if (!state.gameOngoing) return;
 
     const elapsed = Math.floor(mod.GetMatchTimeElapsed());
-    if (elapsed === mod.GetVariable(g(GlobalVar.LastHudTick))) return;
-    mod.SetVariable(g(GlobalVar.LastHudTick), elapsed);
+    if (elapsed === state.lastHudTick) return;
+    state.lastHudTick = elapsed;
     updateAllHud();
 }
 
 function maybeTriggerLowTicketMusic(): void {
-    if (mod.GetVariable(g(GlobalVar.LowMusicTriggered))) return;
+    if (state.lowMusicTriggered) return;
     if (getTeamScore(team(TEAM_1_ID)) > LOW_TICKET_MUSIC_THRESHOLD && getTeamScore(team(TEAM_2_ID)) > LOW_TICKET_MUSIC_THRESHOLD) return;
 
-    mod.SetVariable(g(GlobalVar.LowMusicTriggered), true);
+    state.lowMusicTriggered = true;
     mod.PlayMusic(mod.MusicEvents.Core_Overtime_Loop);
 }
 
 function checkEndGame(): void {
-    if (!mod.GetVariable(g(GlobalVar.GameOngoing)) || mod.GetVariable(g(GlobalVar.EndGameStarted))) return;
+    if (!state.gameOngoing || state.endGameStarted) return;
     if (mod.GetMatchTimeRemaining() > 1 && getTeamScore(team(TEAM_1_ID)) > 0 && getTeamScore(team(TEAM_2_ID)) > 0) return;
     endConquest();
 }
 
 function endConquest(): void {
-    mod.SetVariable(g(GlobalVar.EndGameStarted), true);
-    mod.SetVariable(g(GlobalVar.GameOngoing), false);
+    state.endGameStarted = true;
+    state.gameOngoing = false;
     mod.PauseGameModeTime(true);
     setTeamScore(team(TEAM_1_ID), getTeamScore(team(TEAM_1_ID)));
     setTeamScore(team(TEAM_2_ID), getTeamScore(team(TEAM_2_ID)));
@@ -644,7 +743,7 @@ function endConquest(): void {
 }
 
 function updateVehicleSpawnerForPoint(point: mod.CapturePoint): void {
-    if (!mod.GetVariable(g(GlobalVar.EnableVehicleSpawns))) return;
+    if (!state.enableVehicleSpawns) return;
 
     const index = flagIndex(point);
     if (index < 0) return;
@@ -668,7 +767,7 @@ function awardCapturePlayers(point: mod.CapturePoint): void {
 }
 
 function playCaptureVO(point: mod.CapturePoint): void {
-    if (!mod.GetVariable(g(GlobalVar.EnableVO))) return;
+    if (!state.enableVO) return;
     const owner = mod.GetCurrentOwnerTeam(point);
     mod.PlayVO(mod.SpawnObject(mod.RuntimeSpawn_Common.SFX_VOModule_OneShot2D, mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0)), mod.VoiceOverEvents2D.ObjectiveCaptured, voiceOverFlag(point), owner);
 }
@@ -742,7 +841,7 @@ function updatePlayerCaptureHud(player: mod.Player, point: mod.CapturePoint): vo
     setTextColorIfPresent(widgetName([rootName, "ObjectiveText"]), textColor);
     setWidgetColorIfPresent(widgetName([rootName, "ObjectiveProgress"]), playerIsProgressOwner ? TEAM_1_TEXT() : TEAM_2_TEXT());
     setSizeAndPositionIfPresent(widgetName([rootName, "ObjectiveProgress"]), mod.CreateVector(width, 7, 0), mod.CreateVector(-110 + width / 2, 200, 0));
-    mod.SetVariable(pv(player, PlayerVar.LastCaptureProgress), progress);
+    playerState(player).lastCaptureProgress = progress;
 }
 
 function captureStatusLabel(player: mod.Player, point: mod.CapturePoint): string {
@@ -757,20 +856,25 @@ function captureStatusLabel(player: mod.Player, point: mod.CapturePoint): string
 }
 
 function maybeRunAI(): void {
-    if (!mod.GetVariable(g(GlobalVar.EnableCustomAI))) return;
+    if (!state.enableCustomAI || state.aiSpawnBlocked) return;
 
     const elapsed = Math.floor(mod.GetMatchTimeElapsed());
-    if (elapsed === mod.GetVariable(g(GlobalVar.LastAITick))) return;
-    mod.SetVariable(g(GlobalVar.LastAITick), elapsed);
+    if (elapsed === state.lastAITick) return;
+    state.lastAITick = elapsed;
 
     const allPlayers = mod.AllPlayers();
     const aiCount = countAIPlayers(allPlayers);
     if (aiCount >= MAX_CUSTOM_AI) return;
 
-    if (countTeamPlayers(allPlayers, team(TEAM_1_ID)) <= countTeamPlayers(allPlayers, team(TEAM_2_ID))) {
-        mod.SpawnAIFromAISpawner(mod.GetSpawner(AI_SPAWNER_TEAM_1), team(TEAM_1_ID));
-    } else {
-        mod.SpawnAIFromAISpawner(mod.GetSpawner(AI_SPAWNER_TEAM_2), team(TEAM_2_ID));
+    try {
+        if (countTeamPlayers(allPlayers, team(TEAM_1_ID)) <= countTeamPlayers(allPlayers, team(TEAM_2_ID))) {
+            mod.SpawnAIFromAISpawner(mod.GetSpawner(AI_SPAWNER_TEAM_1), team(TEAM_1_ID));
+        } else {
+            mod.SpawnAIFromAISpawner(mod.GetSpawner(AI_SPAWNER_TEAM_2), team(TEAM_2_ID));
+        }
+    } catch (_error) {
+        void _error;
+        state.aiSpawnBlocked = true;
     }
 }
 
@@ -819,14 +923,14 @@ function sendAIToObjective(player: mod.Player): void {
 }
 
 function checkConquestAssaultWin(): void {
-    if (!mod.GetVariable(g(GlobalVar.ConquestAssault))) return;
+    if (!state.conquestAssault) return;
     if (countOwnedCapturePoints(team(TEAM_2_ID)) > 0) return;
     setTeamScore(team(TEAM_2_ID), 0);
     checkEndGame();
 }
 
 export function OngoingGlobal(): void {
-    if (!mod.GetVariable(g(GlobalVar.GameOngoing)) && !mod.GetVariable(g(GlobalVar.EndGameStarted))) initializeConquestState();
+    if (!state.initialized) initializeConquestState();
     maybeRefreshHud();
     maybeBleedTickets();
     maybeRunAI();
@@ -843,23 +947,24 @@ export function OnPlayerJoinGame(eventPlayer: mod.Player): void {
     initializePlayerState(eventPlayer);
     createPlayerHud(eventPlayer);
     updatePlayerScoreboard(eventPlayer);
-    if (mod.GetVariable(g(GlobalVar.GameOngoing))) updateAllHud();
+    if (state.gameOngoing) updateAllHud();
 }
 
 export function OnPlayerDeployed(eventPlayer: mod.Player): void {
-    mod.SetVariable(pv(eventPlayer, PlayerVar.OnPoint), false);
-    mod.SetVariable(pv(eventPlayer, PlayerVar.OutOfBounds), false);
-    if (mod.GetVariable(g(GlobalVar.GivePlayersNVG))) mod.AddEquipment(eventPlayer, mod.Gadgets.Mask_NVG);
+    const current = playerState(eventPlayer);
+    current.onPoint = false;
+    current.outOfBounds = false;
+    if (state.givePlayersNVG) mod.AddEquipment(eventPlayer, mod.Gadgets.Mask_NVG);
     sendAIToObjective(eventPlayer);
 }
 
 export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Player, _eventDeathType: mod.DeathType, _eventWeaponUnlock: mod.WeaponUnlock): void {
     void _eventDeathType;
     void _eventWeaponUnlock;
-    if (!mod.GetVariable(g(GlobalVar.GameOngoing))) return;
+    if (!state.gameOngoing) return;
     addPlayerScore(eventPlayer, 0, PlayerVar.Deaths);
     addTeamScore(mod.GetTeam(eventPlayer), -1);
-    if (mod.IsPlayerValid(eventOtherPlayer)) mod.SetVariable(pv(eventPlayer, PlayerVar.AITarget), eventOtherPlayer);
+    if (mod.IsPlayerValid(eventOtherPlayer)) playerState(eventPlayer).aiTarget = eventOtherPlayer;
     updateAllHud();
     checkEndGame();
 }
@@ -891,7 +996,7 @@ export function OnCapturePointCaptured(eventCapturePoint: mod.CapturePoint): voi
 }
 
 export function OnCapturePointCapturing(eventCapturePoint: mod.CapturePoint): void {
-    if (!mod.GetVariable(g(GlobalVar.EnableVO))) return;
+    if (!state.enableVO) return;
     mod.PlayVO(mod.SpawnObject(mod.RuntimeSpawn_Common.SFX_VOModule_OneShot2D, mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0)), mod.VoiceOverEvents2D.ObjectiveCapturing, voiceOverFlag(eventCapturePoint), mod.GetOwnerProgressTeam(eventCapturePoint));
 }
 
@@ -906,9 +1011,10 @@ export function OngoingCapturePoint(eventCapturePoint: mod.CapturePoint): void {
 }
 
 export function OnPlayerEnterCapturePoint(eventPlayer: mod.Player, eventCapturePoint: mod.CapturePoint): void {
-    mod.SetVariable(pv(eventPlayer, PlayerVar.OnPoint), true);
-    mod.SetVariable(pv(eventPlayer, PlayerVar.CurrentCapturePointId), mod.GetObjId(eventCapturePoint));
-    mod.SetVariable(pv(eventPlayer, PlayerVar.LastCaptureProgress), mod.GetCaptureProgress(eventCapturePoint));
+    const current = playerState(eventPlayer);
+    current.onPoint = true;
+    current.currentCapturePointId = mod.GetObjId(eventCapturePoint);
+    current.lastCaptureProgress = mod.GetCaptureProgress(eventCapturePoint);
     setPlayerObjectiveVisible(eventPlayer, true);
     updatePlayerCaptureHud(eventPlayer, eventCapturePoint);
     sendAIToObjective(eventPlayer);
@@ -916,14 +1022,15 @@ export function OnPlayerEnterCapturePoint(eventPlayer: mod.Player, eventCaptureP
 
 export function OnPlayerExitCapturePoint(eventPlayer: mod.Player, _eventCapturePoint: mod.CapturePoint): void {
     void _eventCapturePoint;
-    mod.SetVariable(pv(eventPlayer, PlayerVar.OnPoint), false);
-    mod.SetVariable(pv(eventPlayer, PlayerVar.CurrentCapturePointId), -1);
-    mod.SetVariable(pv(eventPlayer, PlayerVar.CaptureTick), 0);
+    const current = playerState(eventPlayer);
+    current.onPoint = false;
+    current.currentCapturePointId = -1;
+    current.captureTick = 0;
     setPlayerObjectiveVisible(eventPlayer, false);
 }
 
 export function OnPlayerInteract(eventPlayer: mod.Player, eventInteractPoint: mod.InteractPoint): void {
-    if (!mod.GetVariable(g(GlobalVar.EnableTeamSwitching))) return;
+    if (!state.enableTeamSwitching) return;
     const id = mod.GetObjId(eventInteractPoint);
     if (id === TEAM_1_ID) mod.SetTeam(eventPlayer, team(TEAM_1_ID));
     if (id === TEAM_2_ID) mod.SetTeam(eventPlayer, team(TEAM_2_ID));
@@ -931,14 +1038,15 @@ export function OnPlayerInteract(eventPlayer: mod.Player, eventInteractPoint: mo
 
 export function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, _eventAreaTrigger: mod.AreaTrigger): void {
     void _eventAreaTrigger;
-    if (!mod.GetVariable(g(GlobalVar.EnableOOB)) || mod.GetVariable(pv(eventPlayer, PlayerVar.IgnoreOOB))) return;
-    mod.SetVariable(pv(eventPlayer, PlayerVar.OutOfBounds), true);
+    const current = playerState(eventPlayer);
+    if (!state.enableOOB || current.ignoreOOB) return;
+    current.outOfBounds = true;
     setPlayerOobVisible(eventPlayer, true);
 }
 
 export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, _eventAreaTrigger: mod.AreaTrigger): void {
     void _eventAreaTrigger;
-    mod.SetVariable(pv(eventPlayer, PlayerVar.OutOfBounds), false);
+    playerState(eventPlayer).outOfBounds = false;
     setPlayerOobVisible(eventPlayer, false);
 }
 
@@ -947,7 +1055,7 @@ export function OnPlayerDamaged(eventPlayer: mod.Player, eventOtherPlayer: mod.P
     void _eventWeaponUnlock;
     if (!mod.IsPlayerValid(eventPlayer) || !mod.IsPlayerValid(eventOtherPlayer)) return;
     if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier) && !mod.Equals(mod.GetTeam(eventPlayer), mod.GetTeam(eventOtherPlayer))) {
-        mod.SetVariable(pv(eventPlayer, PlayerVar.AITarget), eventOtherPlayer);
+        playerState(eventPlayer).aiTarget = eventOtherPlayer;
         mod.AISetTarget(eventPlayer, eventOtherPlayer);
     }
 }

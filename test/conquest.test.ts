@@ -5,6 +5,7 @@ import {
     OnPlayerDied,
     OnPlayerEarnedKill,
     OnPlayerJoinGame,
+    OngoingCapturePoint,
     OngoingGlobal,
 } from "../mods/Script";
 import { setupBfPortalMock, type BfPortalModMock } from "../test-support/bfportal-vitest-mock.generated";
@@ -97,7 +98,7 @@ function setupPortalMock(): void {
             GetPlayersOnPoint: (point: mod.CapturePoint) => asModArray((point as unknown as FakePoint).players),
             GetSpawner: ((id: number) => ({ id, kind: "spawner" })) as unknown as typeof mod.GetSpawner,
             GetTeam: ((value: number | FakePlayer) => (typeof value === "number" ? teams[value] : value.team)) as unknown as typeof mod.GetTeam,
-            GetUIWidgetPosition: (widget: mod.UIWidget) => (widget as unknown as FakeWidget).position ?? vector(0, 0, 0),
+            GetUIWidgetPosition: vi.fn((widget: mod.UIWidget) => (widget as unknown as FakeWidget).position ?? vector(0, 0, 0)) as unknown as typeof mod.GetUIWidgetPosition,
             GetVariable: (variable: mod.Variable) => variables.get(String(variable)),
             GetVehicleSpawner: ((id: number) => ({ id, kind: "vehicleSpawner" })) as unknown as typeof mod.GetVehicleSpawner,
             GlobalVariable: (slot: number) => varKey("g", slot),
@@ -142,7 +143,7 @@ function setupPortalMock(): void {
             }) as typeof mod.SetVariable,
             SetVehicleCategoryAllowedInSurroundingArea: (() => undefined) as typeof mod.SetVehicleCategoryAllowedInSurroundingArea,
             SetVehicleSpawnerAutoSpawn: (() => undefined) as typeof mod.SetVehicleSpawnerAutoSpawn,
-            SpawnAIFromAISpawner: (() => undefined) as typeof mod.SpawnAIFromAISpawner,
+            SpawnAIFromAISpawner: vi.fn(() => undefined) as unknown as typeof mod.SpawnAIFromAISpawner,
             SpawnObject: ((spawn: unknown) => ({ id: objId(spawn), kind: "spawned" })) as typeof mod.SpawnObject,
             ValueInArray: (array: mod.Array, index: number) => (array as unknown as unknown[])[index],
         },
@@ -193,7 +194,7 @@ describe("Conquest script", () => {
         OnGameModeStarted();
 
         expect(modMock.SetGameModeTimeLimit).toHaveBeenCalledWith(2700);
-        expect(modMock.SetGameModeTargetScore).toHaveBeenCalledWith(1);
+        expect(modMock.SetGameModeTargetScore).toHaveBeenCalledWith(10000);
         expect(modMock.SetCapturePointCapturingTime).toHaveBeenCalledTimes(3);
         expect(modMock.SetCapturePointNeutralizationTime).toHaveBeenCalledTimes(3);
         expect(modMock.SetScoreboardType).toHaveBeenCalledWith(mod.ScoreboardType.CustomTwoTeams);
@@ -246,5 +247,22 @@ describe("Conquest script", () => {
         expect(widgets.has("ConquestPlayerHUD_11")).toBe(true);
         expect(widgets.has("ConquestPlayerHUD_10_ObjectiveText")).toBe(true);
         expect(widgets.has("ConquestPlayerHUD_11_ObjectiveText")).toBe(true);
+    });
+
+    it("does not auto-spawn custom AI by default", () => {
+        OnGameModeStarted();
+        elapsed = 1;
+
+        OngoingGlobal();
+
+        expect(modMock.SpawnAIFromAISpawner).not.toHaveBeenCalled();
+    });
+
+    it("updates objective HUD progress without reading widget positions", () => {
+        OnGameModeStarted();
+
+        OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
+
+        expect(modMock.GetUIWidgetPosition).not.toHaveBeenCalled();
     });
 });
