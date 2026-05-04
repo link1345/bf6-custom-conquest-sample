@@ -75,6 +75,76 @@ const FLAG_LETTERS = [
     "Z",
 ];
 
+const BOT_NAMES = [
+    "andy6170 (Bot)",
+    "TheOzzy (Bot)",
+    "Mancour (Bot)",
+    "gala_vs (Bot)",
+    "BattlefieldDad (Bot)",
+    "Matavatar (Bot)",
+    "ToughKarma (Bot)",
+    "extermin8or_ (Bot)",
+    "Draco25240 (Bot)",
+    "CodeName_Deus (Bot)",
+    "TonisGaming (Bot)",
+    "SCKGaming (Bot)",
+    "HybridBeard0 (Bot)",
+    "ClaraTheRed (Bot)",
+    "PrincessTeacup (Bot)",
+    "Haze (Bot)",
+    "Renette (Bot)",
+    "BT Zero (Bot)",
+    "Thirsty Wizard (Bot)",
+    "SwarmFly (Bot)",
+    "Sheer Iceman (Bot)",
+    "Daniel VNZ (Bot)",
+    "Languorian (Bot)",
+    "zbmts (Bot)",
+    "Joshua (Bot)",
+    "Richard (Bot)",
+    "Dirteebreaks (Bot)",
+    "Mystfit (Bot)",
+    "Shorty (Bot)",
+    "tango (Bot)",
+    "Beam (Bot)",
+    "C¥pher (Bot)",
+    "ThirdEyeAgent (Bot)",
+    "floris12fs (Bot)",
+    "oleole56 (Bot)",
+    "LadyArsenic (Bot)",
+    "Akira72 (Bot)",
+    "KieranP (Bot)",
+    "warcreator (Bot)",
+    "Cytochrome2 (Bot)",
+    "LT D.A.L.E. (Bot)",
+    "Kale (Bot)",
+    "OutlawSkot33 (Bot)",
+    "F4rus (Bot)",
+    "TabbedScamper (Bot)",
+    "reni2 (Bot)",
+    "AP_Atipoya (Bot)",
+    "m1kedeluca_ (Bot)",
+    "Ariistuujj (Bot)",
+    "Marcus (DJsparco) (Bot)",
+    "Hope (Bot)",
+    "pompom (Bot)",
+    "mindflexor (Bot)",
+    "Robert5974 (Bot)",
+    "Ricelletis (Bot)",
+    "cczzcx (Bot)",
+    "Fobia_BGa (Bot)",
+    "Nodone (Bot)",
+    "Crush (Bot)",
+    "EIGuimaraes (Bot)",
+    "Bennen (Bot)",
+    "Mary (Bot)",
+    "dzonzla_ (Bot)",
+    "L0gan-M-Sc0tt (Bot)",
+    "FaithWalker (Bot)",
+    "SgtHamster (Bot)",
+    "LoganTheBrawler (Bot)",
+];
+
 const enum PlayerVar {
     Score = 0,
     Kills = 1,
@@ -127,8 +197,12 @@ type ConquestState = {
     givePlayersNVG: boolean;
     conquestAssault: boolean;
     lastAITick: number;
+    lastAIOrderTick: number;
     endGameStarted: boolean;
     aiSpawnBlocked: boolean;
+    botNameIndex: number;
+    lastBleedTeamId: number;
+    lastBleedTime: number;
 };
 
 const state: ConquestState = {
@@ -141,7 +215,7 @@ const state: ConquestState = {
     lastTicketBleedTick: -1,
     lastHudTick: -1,
     lowMusicTriggered: false,
-    enableCustomAI: false,
+    enableCustomAI: true,
     enableTeamSwitching: true,
     enableVO: true,
     enableOOB: true,
@@ -149,8 +223,12 @@ const state: ConquestState = {
     givePlayersNVG: false,
     conquestAssault: false,
     lastAITick: -1,
+    lastAIOrderTick: -1,
     endGameStarted: false,
     aiSpawnBlocked: false,
+    botNameIndex: 0,
+    lastBleedTeamId: NEUTRAL_TEAM_ID,
+    lastBleedTime: -1,
 };
 
 // Runtime player state for the current match. This replaces Portal variables for values that do not need persistence.
@@ -205,11 +283,16 @@ function getTeamScore(teamValue: mod.Team): number {
 }
 
 function setTeamScore(teamValue: mod.Team, score: number): void {
+    const previous = getTeamScore(teamValue);
     const clamped = Math.max(0, Math.floor(score));
     if (teamId(teamValue) === TEAM_1_ID) {
         state.team1Score = clamped;
     } else {
         state.team2Score = clamped;
+    }
+    if (clamped < previous) {
+        state.lastBleedTeamId = teamId(teamValue);
+        state.lastBleedTime = mod.GetMatchTimeElapsed();
     }
     mod.SetGameModeScore(teamValue, clamped);
 }
@@ -342,7 +425,7 @@ function countPlayersOnPoint(point: mod.CapturePoint, owner: mod.Team): number {
 
     for (let i = 0; i < countPortalArray(players); i += 1) {
         const player = portalArrayValue<mod.Player>(players, i);
-        if (mod.IsPlayerValid(player) && mod.Equals(mod.GetTeam(player), owner)) count += 1;
+        if (mod.IsPlayerValid(player) && mod.GetSoldierState(player, mod.SoldierStateBool.IsAlive) && mod.Equals(mod.GetTeam(player), owner)) count += 1;
     }
 
     return count;
@@ -516,13 +599,13 @@ function createObjectiveHud(teamValue: mod.Team, root: mod.UIWidget): void {
             teamValue,
         );
         addContainer(
-            objectiveWidgetName(teamValue, point, "Progress"),
-            mod.CreateVector(x, 122, 0),
-            mod.CreateVector(30, 5, 0),
+            objectiveWidgetName(teamValue, point, "Outline"),
+            mod.CreateVector(x, 90, 0),
+            mod.CreateVector(34, 34, 0),
             root,
             objectiveTextColorForTeam(teamValue, point),
-            1,
-            mod.UIBgFill.Solid,
+            0.8,
+            mod.UIBgFill.OutlineThin,
             teamValue,
         );
     }
@@ -564,10 +647,17 @@ function updateTeamHud(teamValue: mod.Team): void {
 
     setTextIfPresent(widgetName(["ConquestScore", teamValue, "Friendly"]), message("{}", friendly));
     setTextIfPresent(widgetName(["ConquestScore", teamValue, "Enemy"]), message("{}", enemy));
+    setWidgetAlphaIfPresent(widgetName(["ConquestScore", teamValue, "Friendly"]), ticketFlashAlpha(teamValue));
+    setWidgetAlphaIfPresent(widgetName(["ConquestScore", teamValue, "Enemy"]), ticketFlashAlpha(otherTeam(teamValue)));
     setTextIfPresent("ConquestTimer", timeMessage(), find(scoreRootName(teamValue)));
     setSizeAndPositionIfPresent(widgetName(["ConquestBar", teamValue, "Friendly"]), mod.CreateVector(friendlyWidth, 10, 0), mod.CreateVector(-260 + friendlyWidth / 2, 60, 0));
     setSizeAndPositionIfPresent(widgetName(["ConquestBar", teamValue, "Enemy"]), mod.CreateVector(enemyWidth, 10, 0), mod.CreateVector(260 - enemyWidth / 2, 60, 0));
     updateObjectiveHud(teamValue);
+}
+
+function ticketFlashAlpha(scoreTeam: mod.Team): number {
+    if (state.lastBleedTime < 0 || state.lastBleedTeamId !== teamId(scoreTeam)) return 0.8;
+    return Math.max(0.8, 1 - (mod.GetMatchTimeElapsed() - state.lastBleedTime) / 1.75);
 }
 
 // Keeps objective letters and small capture-progress bars in sync with the current capture state.
@@ -579,18 +669,21 @@ function updateObjectiveHud(teamValue: mod.Team): void {
         const point = portalArrayValue<mod.CapturePoint>(points, i);
         const x = (i - (total - 1) / 2) * 50;
         const progress = mod.GetCaptureProgress(point);
-        const progressName = objectiveWidgetName(teamValue, point, "Progress");
+        const outlineName = objectiveWidgetName(teamValue, point, "Outline");
+        const isChanging = progress > 0 && progress < 1;
+        const textAlpha = isChanging ? objectiveFlashAlpha() : 1;
+        const outlineAlpha = isChanging ? objectiveFlashAlpha() : 0.8;
         setTextIfPresent(objectiveWidgetName(teamValue, point, "Text"), message(flagLetter(point)));
         setWidgetColorIfPresent(objectiveWidgetName(teamValue, point, "Text"), objectiveBgColorForTeam(teamValue, point));
         setTextColorIfPresent(objectiveWidgetName(teamValue, point, "Text"), objectiveTextColorForTeam(teamValue, point));
-        setWidgetColorIfPresent(progressName, objectiveProgressColorForTeam(teamValue, point));
-        setSizeAndPositionIfPresent(
-            progressName,
-            mod.CreateVector(Math.max(2, Math.floor(30 * progress)), 5, 0),
-            mod.CreateVector(x, 122, 0),
-        );
-        setVisibleIfPresent(progressName, progress > 0 && progress < 1);
+        setWidgetColorIfPresent(outlineName, objectiveProgressColorForTeam(teamValue, point));
+        setTextAlphaIfPresent(objectiveWidgetName(teamValue, point, "Text"), textAlpha);
+        setWidgetAlphaIfPresent(outlineName, outlineAlpha);
     }
+}
+
+function objectiveFlashAlpha(): number {
+    return mod.GetMatchTimeElapsed() % 1;
 }
 
 function setTextIfPresent(name: string, msg: mod.Message, root?: mod.UIWidget): void {
@@ -605,6 +698,14 @@ function setTextColorIfPresent(name: string, color: mod.Vector): void {
 
 function setWidgetColorIfPresent(name: string, color: mod.Vector): void {
     if (mod.HasUIWidgetWithName(name)) mod.SetUIWidgetBgColor(find(name), color);
+}
+
+function setTextAlphaIfPresent(name: string, alpha: number): void {
+    if (mod.HasUIWidgetWithName(name)) mod.SetUITextAlpha(find(name), alpha);
+}
+
+function setWidgetAlphaIfPresent(name: string, alpha: number): void {
+    if (mod.HasUIWidgetWithName(name)) mod.SetUIWidgetBgAlpha(find(name), alpha);
 }
 
 function setVisibleIfPresent(name: string, visible: boolean): void {
@@ -657,7 +758,7 @@ function initializeConquestState(): void {
     playerStates.clear();
     state.initialized = true;
     state.gameOngoing = false;
-    state.enableCustomAI = false;
+    state.enableCustomAI = true;
     state.enableTeamSwitching = true;
     state.enableVO = true;
     state.enableOOB = true;
@@ -667,9 +768,13 @@ function initializeConquestState(): void {
     state.lastTicketBleedTick = -1;
     state.lastHudTick = -1;
     state.lastAITick = -1;
+    state.lastAIOrderTick = -1;
     state.lowMusicTriggered = false;
     state.endGameStarted = false;
     state.aiSpawnBlocked = false;
+    state.botNameIndex = 0;
+    state.lastBleedTeamId = NEUTRAL_TEAM_ID;
+    state.lastBleedTime = -1;
 
     if (state.conquestAssault) {
         state.team1StartingScore = ASSAULT_ATTACKER_TICKETS;
@@ -735,9 +840,13 @@ function maybeRefreshHud(): void {
     if (!state.gameOngoing) return;
 
     const elapsed = Math.floor(mod.GetMatchTimeElapsed());
-    if (elapsed === state.lastHudTick) return;
+    if (elapsed === state.lastHudTick && !ticketFlashActive()) return;
     state.lastHudTick = elapsed;
     updateAllHud();
+}
+
+function ticketFlashActive(): boolean {
+    return state.lastBleedTime >= 0 && mod.GetMatchTimeElapsed() - state.lastBleedTime < 1.75;
 }
 
 // Triggers the low-ticket music only once per match.
@@ -874,7 +983,7 @@ function updatePlayerCaptureHud(player: mod.Player, point: mod.CapturePoint): vo
     const owner = mod.GetCurrentOwnerTeam(point);
     const ownerProgressTeam = mod.GetOwnerProgressTeam(point);
     const playerIsProgressOwner = mod.Equals(ownerProgressTeam, mod.GetTeam(player));
-    const textColor = mod.Equals(owner, mod.GetTeam(player)) ? TEAM_1_TEXT() : teamId(owner) === NEUTRAL_TEAM_ID ? WHITE() : TEAM_2_TEXT();
+    const textColor = playerIsProgressOwner ? TEAM_1_TEXT() : mod.Equals(owner, mod.GetTeam(player)) ? TEAM_1_TEXT() : teamId(owner) === NEUTRAL_TEAM_ID ? WHITE() : TEAM_2_TEXT();
     const label = captureStatusLabel(player, point);
 
     setTextIfPresent(widgetName([rootName, "ObjectiveText"]), message(label));
@@ -911,13 +1020,32 @@ function maybeRunAI(): void {
 
     try {
         if (countTeamPlayers(allPlayers, team(TEAM_1_ID)) <= countTeamPlayers(allPlayers, team(TEAM_2_ID))) {
-            mod.SpawnAIFromAISpawner(mod.GetSpawner(AI_SPAWNER_TEAM_1), team(TEAM_1_ID));
+            mod.SpawnAIFromAISpawner(mod.GetSpawner(AI_SPAWNER_TEAM_1), nextBotName(), team(TEAM_1_ID));
         } else {
-            mod.SpawnAIFromAISpawner(mod.GetSpawner(AI_SPAWNER_TEAM_2), team(TEAM_2_ID));
+            mod.SpawnAIFromAISpawner(mod.GetSpawner(AI_SPAWNER_TEAM_2), nextBotName(), team(TEAM_2_ID));
         }
     } catch (_error) {
         void _error;
         state.aiSpawnBlocked = true;
+    }
+}
+
+function nextBotName(): mod.Message {
+    const name = BOT_NAMES[state.botNameIndex % BOT_NAMES.length];
+    state.botNameIndex += 1;
+    return message(name);
+}
+
+function maybeIssueAIOrders(): void {
+    if (!state.enableCustomAI) return;
+    const elapsed = Math.floor(mod.GetMatchTimeElapsed());
+    if (elapsed === state.lastAIOrderTick || elapsed % 5 !== 0) return;
+    state.lastAIOrderTick = elapsed;
+
+    const players = mod.AllPlayers();
+    for (let i = 0; i < countPortalArray(players); i += 1) {
+        const player = portalArrayValue<mod.Player>(players, i);
+        sendAIToObjective(player);
     }
 }
 
@@ -944,15 +1072,17 @@ function chooseNearestObjective(player: mod.Player): mod.CapturePoint {
     const points = mod.AllCapturePoints();
     let selected = portalArrayValue<mod.CapturePoint>(points, 0);
     let selectedDistance = mod.DistanceBetween(mod.GetObjectPosition(player), mod.GetObjectPosition(selected));
+    let selectedIsEnemyOrNeutral = !mod.Equals(mod.GetCurrentOwnerTeam(selected), mod.GetTeam(player));
 
     for (let i = 1; i < countPortalArray(points); i += 1) {
         const point = portalArrayValue<mod.CapturePoint>(points, i);
         const owner = mod.GetCurrentOwnerTeam(point);
         const distance = mod.DistanceBetween(mod.GetObjectPosition(player), mod.GetObjectPosition(point));
         const isEnemyOrNeutral = !mod.Equals(owner, mod.GetTeam(player));
-        if (isEnemyOrNeutral && distance < selectedDistance) {
+        if (isEnemyOrNeutral && (!selectedIsEnemyOrNeutral || distance < selectedDistance)) {
             selected = point;
             selectedDistance = distance;
+            selectedIsEnemyOrNeutral = true;
         }
     }
 
@@ -980,6 +1110,7 @@ export function OngoingGlobal(): void {
     maybeRefreshHud();
     maybeBleedTickets();
     maybeRunAI();
+    maybeIssueAIOrders();
     checkConquestAssaultWin();
     checkEndGame();
 }

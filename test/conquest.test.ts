@@ -3,7 +3,9 @@ import {
     OnCapturePointCaptured,
     OnGameModeStarted,
     OnPlayerDied,
+    OnPlayerDeployed,
     OnPlayerEarnedKill,
+    OnPlayerEnterCapturePoint,
     OnPlayerJoinGame,
     OngoingCapturePoint,
     OngoingGlobal,
@@ -13,7 +15,7 @@ import stringkeys from "../dist/Strings.json";
 
 type FakeTeam = { id: number; kind: "team" };
 type FakePoint = { id: number; kind: "point"; owner: FakeTeam; progressOwner: FakeTeam; progress: number; players: FakePlayer[] };
-type FakePlayer = { id: number; kind: "player"; team: FakeTeam; ai?: boolean };
+type FakePlayer = { id: number; kind: "player"; team: FakeTeam; ai?: boolean; alive?: boolean; inVehicle?: boolean };
 type FakeWidget = { name: string; position?: mod.Vector; size?: mod.Vector };
 
 const teams: Record<number, FakeTeam> = {
@@ -23,6 +25,7 @@ const teams: Record<number, FakeTeam> = {
 };
 
 let points: FakePoint[];
+let allPlayers: FakePlayer[];
 let widgets: Map<string, FakeWidget>;
 let variables: Map<string, unknown>;
 let elapsed: number;
@@ -60,6 +63,7 @@ function setupPortalMock(): void {
         { id: 201, kind: "point", owner: teams[1], progressOwner: teams[1], progress: 1, players: [] },
         { id: 202, kind: "point", owner: teams[2], progressOwner: teams[2], progress: 1, players: [] },
     ];
+    allPlayers = [];
 
     modMock = setupBfPortalMock(
         {
@@ -71,16 +75,17 @@ function setupPortalMock(): void {
             AddUIText: vi.fn((...args: unknown[]) => {
                 widgets.set(widgetArgName(args), { name: widgetArgName(args), position: args[1] as mod.Vector, size: args[2] as mod.Vector });
             }) as unknown as typeof mod.AddUIText,
-            AIBattlefieldBehavior: (() => undefined) as typeof mod.AIBattlefieldBehavior,
-            AIMoveToBehavior: (() => undefined) as typeof mod.AIMoveToBehavior,
+            AIBattlefieldBehavior: vi.fn(() => undefined) as unknown as typeof mod.AIBattlefieldBehavior,
+            AIDefendPositionBehavior: vi.fn(() => undefined) as unknown as typeof mod.AIDefendPositionBehavior,
+            AIMoveToBehavior: vi.fn(() => undefined) as unknown as typeof mod.AIMoveToBehavior,
             AISetMoveSpeed: (() => undefined) as typeof mod.AISetMoveSpeed,
             AISetTarget: (() => undefined) as typeof mod.AISetTarget,
             AllCapturePoints: () => asModArray(points),
-            AllPlayers: () => asModArray([]),
+            AllPlayers: () => asModArray(allPlayers),
             CountOf: (array: mod.Array) => (array as unknown as unknown[]).length,
             CreateVector: vector,
             DeleteUIWidget: ((widget: FakeWidget) => widgets.delete(widget.name)) as unknown as typeof mod.DeleteUIWidget,
-            DistanceBetween: () => 10,
+            DistanceBetween: ((a: mod.Vector, b: mod.Vector) => Math.abs((a as unknown as { x: number }).x - (b as unknown as { x: number }).x)) as typeof mod.DistanceBetween,
             EmptyArray: () => asModArray([]),
             EnableCapturePointDeploying: (() => undefined) as typeof mod.EnableCapturePointDeploying,
             EnableGameModeObjective: (() => undefined) as typeof mod.EnableGameModeObjective,
@@ -93,10 +98,16 @@ function setupPortalMock(): void {
             GetMatchTimeElapsed: () => elapsed,
             GetMatchTimeRemaining: () => remaining,
             GetObjId: (value: mod.Object) => objId(value),
-            GetObjectPosition: (() => vector(0, 0, 0)) as typeof mod.GetObjectPosition,
+            GetObjectPosition: ((value: mod.Object) => vector(objId(value), 0, 0)) as typeof mod.GetObjectPosition,
             GetOwnerProgressTeam: (point: mod.CapturePoint) => (point as unknown as FakePoint).progressOwner as unknown as mod.Team,
             GetPlayersOnPoint: (point: mod.CapturePoint) => asModArray((point as unknown as FakePoint).players),
             GetSpawner: ((id: number) => ({ id, kind: "spawner" })) as unknown as typeof mod.GetSpawner,
+            GetSoldierState: ((player: FakePlayer, state: string) => {
+                if (state === "IsAISoldier") return player.ai === true;
+                if (state === "IsInVehicle") return player.inVehicle === true;
+                if (state === "IsAlive") return player.alive !== false;
+                return false;
+            }) as unknown as typeof mod.GetSoldierState,
             GetTeam: ((value: number | FakePlayer) => (typeof value === "number" ? teams[value] : value.team)) as unknown as typeof mod.GetTeam,
             GetUIWidgetPosition: vi.fn((widget: mod.UIWidget) => (widget as unknown as FakeWidget).position ?? vector(0, 0, 0)) as unknown as typeof mod.GetUIWidgetPosition,
             GetVariable: (variable: mod.Variable) => variables.get(String(variable)),
@@ -125,8 +136,10 @@ function setupPortalMock(): void {
             SetScoreboardSorting: (() => undefined) as typeof mod.SetScoreboardSorting,
             SetScoreboardType: (() => undefined) as typeof mod.SetScoreboardType,
             SetTeam: (() => undefined) as typeof mod.SetTeam,
-            SetUITextColor: (() => undefined) as typeof mod.SetUITextColor,
-            SetUITextLabel: (() => undefined) as typeof mod.SetUITextLabel,
+            SetUITextAlpha: vi.fn(() => undefined) as unknown as typeof mod.SetUITextAlpha,
+            SetUITextColor: vi.fn(() => undefined) as unknown as typeof mod.SetUITextColor,
+            SetUITextLabel: vi.fn(() => undefined) as unknown as typeof mod.SetUITextLabel,
+            SetUIWidgetBgAlpha: vi.fn(() => undefined) as unknown as typeof mod.SetUIWidgetBgAlpha,
             SetUIWidgetBgColor: (() => undefined) as typeof mod.SetUIWidgetBgColor,
             SetUIWidgetBgFill: (() => undefined) as typeof mod.SetUIWidgetBgFill,
             SetUIWidgetDepth: (() => undefined) as typeof mod.SetUIWidgetDepth,
@@ -150,7 +163,7 @@ function setupPortalMock(): void {
         {
             stringkeys,
             Gadgets: { Mask_NVG: "Mask_NVG" } as unknown as typeof mod.Gadgets,
-            MoveSpeed: { InvestigateRun: "InvestigateRun" } as unknown as typeof mod.MoveSpeed,
+            MoveSpeed: { InvestigateRun: "InvestigateRun", Sprint: "Sprint" } as unknown as typeof mod.MoveSpeed,
             MusicEvents: {
                 Core_EndOfRound_Loop: "Core_EndOfRound_Loop",
                 Core_LastPhaseBegin: "Core_LastPhaseBegin",
@@ -160,9 +173,9 @@ function setupPortalMock(): void {
             MusicParams: { Core_IsWinning: "Core_IsWinning" } as unknown as typeof mod.MusicParams,
             RuntimeSpawn_Common: { SFX_VOModule_OneShot2D: 1 } as unknown as typeof mod.RuntimeSpawn_Common,
             ScoreboardType: { CustomTwoTeams: "CustomTwoTeams" } as unknown as typeof mod.ScoreboardType,
-            SoldierStateBool: { IsAISoldier: "IsAISoldier" } as unknown as typeof mod.SoldierStateBool,
+            SoldierStateBool: { IsAISoldier: "IsAISoldier", IsAlive: "IsAlive", IsInVehicle: "IsInVehicle" } as unknown as typeof mod.SoldierStateBool,
             UIAnchor: { Center: "Center", TopCenter: "TopCenter" } as unknown as typeof mod.UIAnchor,
-            UIBgFill: { Blur: "Blur", None: "None", Solid: "Solid" } as unknown as typeof mod.UIBgFill,
+            UIBgFill: { Blur: "Blur", None: "None", OutlineThin: "OutlineThin", Solid: "Solid" } as unknown as typeof mod.UIBgFill,
             UIDepth: { AboveGameUI: "AboveGameUI" } as unknown as typeof mod.UIDepth,
             VehicleCategories: { Air_All: "Air_All" } as unknown as typeof mod.VehicleCategories,
             VoiceOverEvents2D: {
@@ -253,13 +266,24 @@ describe("Conquest script", () => {
         expect(widgets.has("ConquestPlayerHUD_11_ObjectiveText")).toBe(true);
     });
 
-    it("does not auto-spawn custom AI by default", () => {
+    it("auto-spawns custom AI using the smaller team while under the bot cap", () => {
         OnGameModeStarted();
         elapsed = 1;
 
         OngoingGlobal();
 
-        expect(modMock.SpawnAIFromAISpawner).not.toHaveBeenCalled();
+        expect(modMock.SpawnAIFromAISpawner).toHaveBeenCalledWith(expect.objectContaining({ id: 901 }), expect.objectContaining({ msg: "andy6170 (Bot)" }), teams[1]);
+    });
+
+    it("rotates custom AI bot names from the original AddBotNames list", () => {
+        OnGameModeStarted();
+        elapsed = 1;
+        OngoingGlobal();
+        elapsed = 2;
+        OngoingGlobal();
+
+        expect(modMock.SpawnAIFromAISpawner).toHaveBeenNthCalledWith(1, expect.objectContaining({ id: 901 }), expect.objectContaining({ msg: "andy6170 (Bot)" }), teams[1]);
+        expect(modMock.SpawnAIFromAISpawner).toHaveBeenNthCalledWith(2, expect.objectContaining({ id: 901 }), expect.objectContaining({ msg: "TheOzzy (Bot)" }), teams[1]);
     });
 
     it("updates objective HUD progress without reading widget positions", () => {
@@ -270,11 +294,97 @@ describe("Conquest script", () => {
         expect(modMock.GetUIWidgetPosition).not.toHaveBeenCalled();
     });
 
-    it("hides completed objective progress bars", () => {
+    it("does not count dead players in the capture point player count", () => {
+        const player: FakePlayer = { id: 10, kind: "player", team: teams[1] };
+        const deadFriendly: FakePlayer = { id: 11, kind: "player", team: teams[1], alive: false };
+        const enemy: FakePlayer = { id: 20, kind: "player", team: teams[2] };
+        points[0].players = [player, deadFriendly, enemy];
+
+        OnPlayerJoinGame(player as unknown as mod.Player);
+        OnPlayerEnterCapturePoint(player as unknown as mod.Player, points[0] as unknown as mod.CapturePoint);
+
+        const countCall = vi.mocked(modMock.SetUITextLabel).mock.calls.find(([widget]) => (widget as FakeWidget).name === "ConquestPlayerHUD_10_ObjectiveCount");
+        expect((countCall?.[1] as unknown as { args: unknown[] }).args).toEqual([1, 1, undefined]);
+    });
+
+    it("colors CAPTURING as friendly even while the point owner is neutral", () => {
+        const player: FakePlayer = { id: 10, kind: "player", team: teams[1] };
+        points[0].owner = teams[0];
+        points[0].progressOwner = teams[1];
+        points[0].progress = 0.5;
+
+        OnPlayerJoinGame(player as unknown as mod.Player);
+        OnPlayerEnterCapturePoint(player as unknown as mod.Player, points[0] as unknown as mod.CapturePoint);
+
+        expect(modMock.SetUITextColor).toHaveBeenCalledWith(expect.objectContaining({ name: "ConquestPlayerHUD_10_ObjectiveText" }), vector(0, 0.8, 1));
+    });
+
+    it("uses objective outline widgets instead of separate progress bars", () => {
+        OnGameModeStarted();
+
+        expect(widgets.has("ConquestObjective_1_200_Text")).toBe(true);
+        expect(widgets.has("ConquestObjective_1_200_Outline")).toBe(true);
+        expect(widgets.has("ConquestObjective_1_200_Progress")).toBe(false);
+    });
+
+    it("flashes objective text and outline alpha while a flag is changing", () => {
+        points[0].progress = 0.5;
+        elapsed = 1.25;
         OnGameModeStarted();
 
         OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
 
-        expect(modMock.SetUIWidgetVisible).toHaveBeenCalledWith(expect.objectContaining({ name: "ConquestObjective_1_200_Progress" }), false);
+        const textAlphaCall = vi.mocked(modMock.SetUITextAlpha).mock.calls.find(([widget]) => (widget as FakeWidget).name === "ConquestObjective_1_200_Text");
+        const outlineAlphaCall = vi.mocked(modMock.SetUIWidgetBgAlpha).mock.calls.find(([widget]) => (widget as FakeWidget).name === "ConquestObjective_1_200_Outline");
+        expect(textAlphaCall?.[1]).toBeCloseTo(0.25);
+        expect(outlineAlphaCall?.[1]).toBeCloseTo(0.25);
+    });
+
+    it("briefly makes the losing ticket background opaque when tickets bleed", () => {
+        OnGameModeStarted();
+        elapsed = 2;
+
+        OngoingGlobal();
+
+        expect(modMock.SetUIWidgetBgAlpha).toHaveBeenCalledWith(expect.objectContaining({ name: "ConquestScore_1_Enemy" }), 1);
+    });
+
+    it("smoothly fades the losing ticket background after tickets bleed", () => {
+        OnGameModeStarted();
+        elapsed = 2;
+        OngoingGlobal();
+
+        elapsed = 2.175;
+        OngoingGlobal();
+
+        const enemyScoreAlphaCalls = vi.mocked(modMock.SetUIWidgetBgAlpha).mock.calls.filter(([widget]) => (widget as FakeWidget).name === "ConquestScore_1_Enemy");
+        expect(enemyScoreAlphaCalls.at(-1)?.[1]).toBeCloseTo(0.9);
+    });
+
+    it("sends AI to an enemy objective even when the first objective is friendly and closer", () => {
+        const aiPlayer: FakePlayer = { id: 200, kind: "player", team: teams[1], ai: true };
+        points[0].owner = teams[1];
+        points[1].owner = teams[1];
+        points[2].owner = teams[2];
+        OnGameModeStarted();
+
+        OnPlayerDeployed(aiPlayer as unknown as mod.Player);
+
+        expect(modMock.AIMoveToBehavior).toHaveBeenCalledWith(aiPlayer, vector(202, 0, 0));
+        expect(modMock.AIDefendPositionBehavior).not.toHaveBeenCalled();
+    });
+
+    it("periodically reissues objective orders to active AI so they do not stay on a friendly point", () => {
+        const aiPlayer: FakePlayer = { id: 250, kind: "player", team: teams[1], ai: true };
+        allPlayers = [aiPlayer];
+        points[0].owner = teams[1];
+        points[1].owner = teams[1];
+        points[2].owner = teams[2];
+        OnGameModeStarted();
+
+        elapsed = 5;
+        OngoingGlobal();
+
+        expect(modMock.AIMoveToBehavior).toHaveBeenCalledWith(aiPlayer, vector(202, 0, 0));
     });
 });
