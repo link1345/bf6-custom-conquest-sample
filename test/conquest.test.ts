@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
     OnCapturePointCaptured,
+    OnCapturePointCapturing,
     OnGameModeStarted,
     OnPlayerDied,
     OnPlayerDeployed,
@@ -30,6 +31,7 @@ let widgets: Map<string, FakeWidget>;
 let variables: Map<string, unknown>;
 let elapsed: number;
 let remaining: number;
+let waitResolvers: Array<() => void>;
 let modMock: BfPortalModMock;
 
 function vector(x: number, y: number, z: number): mod.Vector {
@@ -56,6 +58,7 @@ function widgetArgName(args: unknown[]): string {
 function setupPortalMock(): void {
     widgets = new Map();
     variables = new Map();
+    waitResolvers = [];
     elapsed = 0;
     remaining = 2700;
     points = [
@@ -100,7 +103,7 @@ function setupPortalMock(): void {
             GetObjId: (value: mod.Object) => objId(value),
             GetObjectPosition: ((value: mod.Object) => vector(objId(value), 0, 0)) as typeof mod.GetObjectPosition,
             GetOwnerProgressTeam: (point: mod.CapturePoint) => (point as unknown as FakePoint).progressOwner as unknown as mod.Team,
-            GetPlayersOnPoint: (point: mod.CapturePoint) => asModArray((point as unknown as FakePoint).players),
+            GetPlayersOnPoint: vi.fn((point: mod.CapturePoint) => asModArray((point as unknown as FakePoint).players)) as unknown as typeof mod.GetPlayersOnPoint,
             GetSpawner: ((id: number) => ({ id, kind: "spawner" })) as unknown as typeof mod.GetSpawner,
             GetSoldierState: ((player: FakePlayer, state: string) => {
                 if (state === "IsAISoldier") return player.ai === true;
@@ -121,7 +124,7 @@ function setupPortalMock(): void {
             ObjectVariable: ((owner: mod.Object, slot: number) => varKey("o", objId(owner), slot)) as typeof mod.ObjectVariable,
             PauseGameModeTime: (() => undefined) as typeof mod.PauseGameModeTime,
             PlayMusic: (() => undefined) as typeof mod.PlayMusic,
-            PlayVO: (() => undefined) as typeof mod.PlayVO,
+            PlayVO: vi.fn(() => undefined) as unknown as typeof mod.PlayVO,
             SetCapturePointCapturingTime: (() => undefined) as typeof mod.SetCapturePointCapturingTime,
             SetCapturePointNeutralizationTime: (() => undefined) as typeof mod.SetCapturePointNeutralizationTime,
             SetGameModeScore: (() => undefined) as typeof mod.SetGameModeScore,
@@ -140,7 +143,7 @@ function setupPortalMock(): void {
             SetUITextColor: vi.fn(() => undefined) as unknown as typeof mod.SetUITextColor,
             SetUITextLabel: vi.fn(() => undefined) as unknown as typeof mod.SetUITextLabel,
             SetUIWidgetBgAlpha: vi.fn(() => undefined) as unknown as typeof mod.SetUIWidgetBgAlpha,
-            SetUIWidgetBgColor: (() => undefined) as typeof mod.SetUIWidgetBgColor,
+            SetUIWidgetBgColor: vi.fn(() => undefined) as unknown as typeof mod.SetUIWidgetBgColor,
             SetUIWidgetBgFill: (() => undefined) as typeof mod.SetUIWidgetBgFill,
             SetUIWidgetDepth: (() => undefined) as typeof mod.SetUIWidgetDepth,
             SetUIWidgetPosition: vi.fn((widget: FakeWidget, position: mod.Vector) => {
@@ -157,8 +160,14 @@ function setupPortalMock(): void {
             SetVehicleCategoryAllowedInSurroundingArea: (() => undefined) as typeof mod.SetVehicleCategoryAllowedInSurroundingArea,
             SetVehicleSpawnerAutoSpawn: (() => undefined) as typeof mod.SetVehicleSpawnerAutoSpawn,
             SpawnAIFromAISpawner: vi.fn(() => undefined) as unknown as typeof mod.SpawnAIFromAISpawner,
-            SpawnObject: ((spawn: unknown) => ({ id: objId(spawn), kind: "spawned" })) as typeof mod.SpawnObject,
+            SpawnObject: vi.fn((spawn: unknown) => ({ id: objId(spawn), kind: "spawned" })) as unknown as typeof mod.SpawnObject,
             ValueInArray: (array: mod.Array, index: number) => (array as unknown as unknown[])[index],
+            Wait: vi.fn(
+                () =>
+                    new Promise<void>((resolve) => {
+                        waitResolvers.push(resolve);
+                    }),
+            ) as unknown as typeof mod.Wait,
         },
         {
             stringkeys,
@@ -215,6 +224,7 @@ describe("Conquest script", () => {
         expect(modMock.SetCapturePointCapturingTime).toHaveBeenCalledTimes(3);
         expect(modMock.SetCapturePointNeutralizationTime).toHaveBeenCalledTimes(3);
         expect(modMock.SetScoreboardType).toHaveBeenCalledWith(mod.ScoreboardType.CustomTwoTeams);
+        expect(modMock.AddUIContainer).toHaveBeenCalledWith("ConquestHUD_Shared_Root", expect.anything(), expect.anything(), mod.UIAnchor.TopCenter);
         expect(modMock.AddUIContainer).toHaveBeenCalledWith("ConquestHUD_1_Root", expect.anything(), expect.anything(), mod.UIAnchor.TopCenter, teams[1]);
     });
 
@@ -307,7 +317,7 @@ describe("Conquest script", () => {
         expect((countCall?.[1] as unknown as { args: unknown[] }).args).toEqual([1, 1, undefined]);
     });
 
-    it("colors CAPTURING as friendly even while the point owner is neutral", () => {
+    it("colors CAPTURING as neutral while the point owner is neutral", () => {
         const player: FakePlayer = { id: 10, kind: "player", team: teams[1] };
         points[0].owner = teams[0];
         points[0].progressOwner = teams[1];
@@ -316,28 +326,170 @@ describe("Conquest script", () => {
         OnPlayerJoinGame(player as unknown as mod.Player);
         OnPlayerEnterCapturePoint(player as unknown as mod.Player, points[0] as unknown as mod.CapturePoint);
 
-        expect(modMock.SetUITextColor).toHaveBeenCalledWith(expect.objectContaining({ name: "ConquestPlayerHUD_10_ObjectiveText" }), vector(0, 0.8, 1));
+        expect(modMock.SetUITextColor).toHaveBeenCalledWith(expect.objectContaining({ name: "ConquestPlayerHUD_10_ObjectiveText" }), vector(1, 1, 1));
     });
 
     it("uses objective outline widgets instead of separate progress bars", () => {
         OnGameModeStarted();
 
-        expect(widgets.has("ConquestObjective_1_200_Text")).toBe(true);
-        expect(widgets.has("ConquestObjective_1_200_Outline")).toBe(true);
-        expect(widgets.has("ConquestObjective_1_200_Progress")).toBe(false);
+        expect(widgets.has("ConquestObjective_200_Text")).toBe(true);
+        expect(widgets.has("ConquestObjective_200_Outline")).toBe(true);
+        expect(widgets.has("ConquestObjective_1_200_Text")).toBe(false);
+        expect(widgets.has("ConquestObjective_200_Progress")).toBe(false);
+        expect(widgets.get("ConquestObjective_200_Outline")?.size).toEqual(widgets.get("ConquestObjective_200_Text")?.size);
+        expect(vi.mocked(modMock.AddUIText).mock.calls.some(([name]) => name === "ConquestObjective_200_Outline")).toBe(true);
+        expect(vi.mocked(modMock.AddUIContainer).mock.calls.some(([name]) => name === "ConquestObjective_200_Outline")).toBe(false);
     });
 
-    it("flashes objective text and outline alpha while a flag is changing", () => {
+    it("creates the timer as a single shared widget", () => {
+        OnGameModeStarted();
+
+        const timerWidgets = vi.mocked(modMock.AddUIText).mock.calls.filter(([name]) => name === "ConquestTimer");
+        expect(timerWidgets).toHaveLength(1);
+    });
+
+    it("flashes objective text and outline with the same alpha while a flag is changing", () => {
         points[0].progress = 0.5;
-        elapsed = 1.25;
         OnGameModeStarted();
 
         OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
 
-        const textAlphaCall = vi.mocked(modMock.SetUITextAlpha).mock.calls.find(([widget]) => (widget as FakeWidget).name === "ConquestObjective_1_200_Text");
-        const outlineAlphaCall = vi.mocked(modMock.SetUIWidgetBgAlpha).mock.calls.find(([widget]) => (widget as FakeWidget).name === "ConquestObjective_1_200_Outline");
-        expect(textAlphaCall?.[1]).toBeCloseTo(0.25);
-        expect(outlineAlphaCall?.[1]).toBeCloseTo(0.25);
+        const textAlphaCalls = vi.mocked(modMock.SetUITextAlpha).mock.calls.filter(([widget]) => (widget as FakeWidget).name === "ConquestObjective_200_Text");
+        const textBgAlphaCalls = vi.mocked(modMock.SetUIWidgetBgAlpha).mock.calls.filter(([widget]) => (widget as FakeWidget).name === "ConquestObjective_200_Text");
+        const outlineAlphaCalls = vi.mocked(modMock.SetUIWidgetBgAlpha).mock.calls.filter(([widget]) => (widget as FakeWidget).name === "ConquestObjective_200_Outline");
+        expect(textAlphaCalls.at(-1)?.[1]).toBeCloseTo(0);
+        expect(textBgAlphaCalls.at(-1)?.[1]).toBeCloseTo(0);
+        expect(outlineAlphaCalls.at(-1)?.[1]).toBeCloseTo(0);
+        expect(outlineAlphaCalls.at(-1)?.[1]).toBe(textAlphaCalls.at(-1)?.[1]);
+    });
+
+    it("uses the same owner color for objective text and outline while a flag is changing", () => {
+        points[0].owner = teams[2];
+        points[0].progressOwner = teams[1];
+        points[0].progress = 0.5;
+        OnGameModeStarted();
+
+        OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
+
+        expect(modMock.SetUITextColor).toHaveBeenCalledWith(expect.objectContaining({ name: "ConquestObjective_200_Text" }), vector(1, 0.2, 0.2));
+        expect(modMock.SetUITextColor).toHaveBeenCalledWith(expect.objectContaining({ name: "ConquestObjective_200_Outline" }), vector(1, 0.2, 0.2));
+        expect(modMock.SetUIWidgetBgColor).toHaveBeenCalledWith(expect.objectContaining({ name: "ConquestObjective_200_Outline" }), vector(1, 0.2, 0.2));
+    });
+
+    it("reuses VO objects instead of spawning them during capture events", () => {
+        OnGameModeStarted();
+        const spawnCountAfterStart = vi.mocked(modMock.SpawnObject).mock.calls.length;
+
+        OnCapturePointCapturing(points[0] as unknown as mod.CapturePoint);
+        OnCapturePointCapturing(points[0] as unknown as mod.CapturePoint);
+        OnCapturePointCaptured(points[0] as unknown as mod.CapturePoint);
+
+        expect(modMock.SpawnObject).toHaveBeenCalledTimes(spawnCountAfterStart);
+        expect(modMock.PlayVO).toHaveBeenCalledTimes(3);
+    });
+
+    it("does not start duplicate objective HUD wait loops for the same point", () => {
+        points[0].progress = 0.5;
+        OnGameModeStarted();
+        const waitsAfterStart = waitResolvers.length;
+
+        OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
+        OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
+
+        expect(waitResolvers.length).toBe(waitsAfterStart + 1);
+    });
+
+    it("does not start an objective HUD wait loop when the point is not changing", () => {
+        points[0].progress = 1;
+        OnGameModeStarted();
+        const waitsAfterStart = waitResolvers.length;
+
+        OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
+
+        expect(waitResolvers.length).toBe(waitsAfterStart);
+    });
+
+    it("restores objective UI alpha when the flag stops changing", async () => {
+        points[0].progress = 0.5;
+        OnGameModeStarted();
+        OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
+        const objectiveWait = waitResolvers.at(-1);
+        expect(objectiveWait).toBeDefined();
+
+        points[0].progress = 1;
+        objectiveWait?.();
+        await Promise.resolve();
+
+        const textAlphaCalls = vi.mocked(modMock.SetUITextAlpha).mock.calls.filter(([widget]) => (widget as FakeWidget).name === "ConquestObjective_200_Text");
+        const textBgAlphaCalls = vi.mocked(modMock.SetUIWidgetBgAlpha).mock.calls.filter(([widget]) => (widget as FakeWidget).name === "ConquestObjective_200_Text");
+        const outlineAlphaCalls = vi.mocked(modMock.SetUIWidgetBgAlpha).mock.calls.filter(([widget]) => (widget as FakeWidget).name === "ConquestObjective_200_Outline");
+        expect(textAlphaCalls.at(-1)?.[1]).toBe(1);
+        expect(textBgAlphaCalls.at(-1)?.[1]).toBe(0.8);
+        expect(outlineAlphaCalls.at(-1)?.[1]).toBe(1);
+        expect(outlineAlphaCalls.at(-1)?.[1]).toBe(textAlphaCalls.at(-1)?.[1]);
+    });
+
+    it("reuses one capture-point player list for every personal HUD update", () => {
+        const player1: FakePlayer = { id: 10, kind: "player", team: teams[1] };
+        const player2: FakePlayer = { id: 11, kind: "player", team: teams[1] };
+        const enemy: FakePlayer = { id: 20, kind: "player", team: teams[2] };
+        const deadEnemy: FakePlayer = { id: 21, kind: "player", team: teams[2], alive: false };
+        points[0].players = [player1, player2, enemy, deadEnemy];
+        OnPlayerJoinGame(player1 as unknown as mod.Player);
+        OnPlayerJoinGame(player2 as unknown as mod.Player);
+        OnGameModeStarted();
+        vi.mocked(modMock.GetPlayersOnPoint).mockClear();
+
+        OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
+
+        expect(modMock.GetPlayersOnPoint).toHaveBeenCalledTimes(1);
+        const countCalls = vi.mocked(modMock.SetUITextLabel).mock.calls.filter(([widget]) => String((widget as FakeWidget).name).endsWith("ObjectiveCount"));
+        expect((countCalls.find(([widget]) => (widget as FakeWidget).name === "ConquestPlayerHUD_10_ObjectiveCount")?.[1] as unknown as { args: unknown[] }).args).toEqual([2, 1, undefined]);
+        expect((countCalls.find(([widget]) => (widget as FakeWidget).name === "ConquestPlayerHUD_11_ObjectiveCount")?.[1] as unknown as { args: unknown[] }).args).toEqual([2, 1, undefined]);
+    });
+
+    it("throttles personal capture HUD updates per objective", () => {
+        const player: FakePlayer = { id: 10, kind: "player", team: teams[1] };
+        points[0].players = [player];
+        OnPlayerJoinGame(player as unknown as mod.Player);
+        OnGameModeStarted();
+        vi.mocked(modMock.GetPlayersOnPoint).mockClear();
+
+        OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
+        OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
+        elapsed = 1;
+        OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
+
+        expect(modMock.GetPlayersOnPoint).toHaveBeenCalledTimes(2);
+    });
+
+    it("hides the personal capture HUD for dead players", () => {
+        const player: FakePlayer = { id: 10, kind: "player", team: teams[1], alive: false };
+        points[0].players = [player];
+        OnPlayerJoinGame(player as unknown as mod.Player);
+        OnGameModeStarted();
+        vi.mocked(modMock.SetUITextLabel).mockClear();
+
+        OnPlayerEnterCapturePoint(player as unknown as mod.Player, points[0] as unknown as mod.CapturePoint);
+        OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
+
+        expect(modMock.SetUIWidgetVisible).toHaveBeenCalledWith(expect.objectContaining({ name: "ConquestPlayerHUD_10_ObjectiveText" }), false);
+        expect(modMock.SetUITextLabel).not.toHaveBeenCalledWith(expect.objectContaining({ name: "ConquestPlayerHUD_10_ObjectiveText" }), expect.anything());
+    });
+
+    it("hides the personal capture HUD when a player dies or deploys", () => {
+        const player: FakePlayer = { id: 10, kind: "player", team: teams[1] };
+        const enemy: FakePlayer = { id: 20, kind: "player", team: teams[2] };
+        OnPlayerJoinGame(player as unknown as mod.Player);
+        OnGameModeStarted();
+        OnPlayerEnterCapturePoint(player as unknown as mod.Player, points[0] as unknown as mod.CapturePoint);
+        vi.mocked(modMock.SetUIWidgetVisible).mockClear();
+
+        OnPlayerDied(player as unknown as mod.Player, enemy as unknown as mod.Player, {} as mod.DeathType, {} as mod.WeaponUnlock);
+        OnPlayerDeployed(player as unknown as mod.Player);
+
+        const textVisibilityCalls = vi.mocked(modMock.SetUIWidgetVisible).mock.calls.filter(([widget]) => (widget as FakeWidget).name === "ConquestPlayerHUD_10_ObjectiveText");
+        expect(textVisibilityCalls.map(([, visible]) => visible)).toEqual([false, false]);
     });
 
     it("briefly makes the losing ticket background opaque when tickets bleed", () => {

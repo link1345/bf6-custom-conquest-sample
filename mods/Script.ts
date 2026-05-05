@@ -36,6 +36,15 @@ const FLAG_NEUTRAL_TIME_SECONDS = 20;
 const MAX_CUSTOM_AI = 36;
 // Scoreboard column index used for sorting. Column 1 is Score.
 const SCOREBOARD_SORT_COLUMN = 1;
+const CAPTUREPOINT_FLASH_GLOBAL_SLOT = 24;
+const TICK_SOUND_LOSING_GLOBAL_SLOT = 20;
+const CAPTURED_SOUND_GLOBAL_SLOT = 32;
+const CAPTURED_VO_GLOBAL_SLOT = 33;
+const CAPTURING_VO_GLOBAL_SLOT = 39;
+const TICK_SOUND_TAKING_GLOBAL_SLOT = 44;
+const CAPTURE_TICK_SOUND_INTERVAL = 40;
+const PLAYER_CAPTURE_HUD_INTERVAL_SECONDS = 0.1;
+const AI_ORDER_INTERVAL_SECONDS = 5;
 
 // HUD colors. The first vector is text/bar color, the second is the background color.
 const TEAM_1_TEXT = () => mod.CreateVector(0, 0.8, 1);
@@ -175,8 +184,11 @@ type PlayerState = {
     captureTick: number;
     outOfBounds: boolean;
     ignoreOOB: boolean;
-    aiTarget?: mod.Player;
+    aiTarget?: mod.Player | mod.CapturePoint;
     aiInAction: boolean;
+    vehicleStartPosition?: mod.Vector;
+    vehicleEnteredAt: number;
+    aiActionUntil: number;
 };
 
 type ConquestState = {
@@ -203,6 +215,9 @@ type ConquestState = {
     botNameIndex: number;
     lastBleedTeamId: number;
     lastBleedTime: number;
+    lastHudFlashTick: number;
+    lastCaptureFlashTick: number;
+    captureFlashLoopRunning: boolean;
 };
 
 const state: ConquestState = {
@@ -229,10 +244,15 @@ const state: ConquestState = {
     botNameIndex: 0,
     lastBleedTeamId: NEUTRAL_TEAM_ID,
     lastBleedTime: -1,
+    lastHudFlashTick: -1,
+    lastCaptureFlashTick: -1,
+    captureFlashLoopRunning: false,
 };
 
 // Runtime player state for the current match. This replaces Portal variables for values that do not need persistence.
 const playerStates = new Map<number, PlayerState>();
+const objectiveHudLoops = new Set<number>();
+const lastPlayerCaptureHudUpdateByPoint = new Map<number, number>();
 
 function defaultPlayerState(): PlayerState {
     return {
@@ -249,6 +269,8 @@ function defaultPlayerState(): PlayerState {
         outOfBounds: false,
         ignoreOOB: false,
         aiInAction: false,
+        vehicleEnteredAt: -1,
+        aiActionUntil: -1,
     };
 }
 
@@ -276,6 +298,30 @@ function otherTeamId(id: number): number {
 
 function otherTeam(teamValue: mod.Team): mod.Team {
     return team(otherTeamId(teamId(teamValue)));
+}
+
+function capturepointFlashGlobalVar(): mod.Variable {
+    return mod.GlobalVariable(CAPTUREPOINT_FLASH_GLOBAL_SLOT);
+}
+
+function tickSoundLosingGlobalVar(): mod.Variable {
+    return mod.GlobalVariable(TICK_SOUND_LOSING_GLOBAL_SLOT);
+}
+
+function capturedSoundGlobalVar(): mod.Variable {
+    return mod.GlobalVariable(CAPTURED_SOUND_GLOBAL_SLOT);
+}
+
+function capturedVoGlobalVar(): mod.Variable {
+    return mod.GlobalVariable(CAPTURED_VO_GLOBAL_SLOT);
+}
+
+function capturingVoGlobalVar(): mod.Variable {
+    return mod.GlobalVariable(CAPTURING_VO_GLOBAL_SLOT);
+}
+
+function tickSoundTakingGlobalVar(): mod.Variable {
+    return mod.GlobalVariable(TICK_SOUND_TAKING_GLOBAL_SLOT);
 }
 
 function getTeamScore(teamValue: mod.Team): number {
@@ -418,9 +464,14 @@ function countOwnedCapturePoints(owner: mod.Team): number {
     return owned;
 }
 
+type PointOccupancy = {
+    players: mod.Array;
+    team1Count: number;
+    team2Count: number;
+};
+
 // Counts players from one team on a capture point for the player objective HUD.
-function countPlayersOnPoint(point: mod.CapturePoint, owner: mod.Team): number {
-    const players = mod.GetPlayersOnPoint(point);
+function countPlayersInArray(players: mod.Array, owner: mod.Team): number {
     let count = 0;
 
     for (let i = 0; i < countPortalArray(players); i += 1) {
@@ -429,6 +480,36 @@ function countPlayersOnPoint(point: mod.CapturePoint, owner: mod.Team): number {
     }
 
     return count;
+}
+
+function pointOccupancy(point: mod.CapturePoint): PointOccupancy {
+    const players = mod.GetPlayersOnPoint(point);
+    return {
+        players,
+        team1Count: countPlayersInArray(players, team(TEAM_1_ID)),
+        team2Count: countPlayersInArray(players, team(TEAM_2_ID)),
+    };
+}
+
+function friendlyCountForTeam(occupancy: PointOccupancy, teamValue: mod.Team): number {
+    return teamId(teamValue) === TEAM_1_ID ? occupancy.team1Count : occupancy.team2Count;
+}
+
+function enemyCountForTeam(occupancy: PointOccupancy, teamValue: mod.Team): number {
+    return teamId(teamValue) === TEAM_1_ID ? occupancy.team2Count : occupancy.team1Count;
+}
+
+function playerCanShowCaptureHud(player: mod.Player): boolean {
+    return mod.IsPlayerValid(player) && mod.GetSoldierState(player, mod.SoldierStateBool.IsAlive);
+}
+
+function shouldUpdatePlayerCaptureHud(point: mod.CapturePoint): boolean {
+    const pointId = mod.GetObjId(point);
+    const elapsed = mod.GetMatchTimeElapsed();
+    const previous = lastPlayerCaptureHudUpdateByPoint.get(pointId);
+    if (previous !== undefined && elapsed - previous < PLAYER_CAPTURE_HUD_INTERVAL_SECONDS) return false;
+    lastPlayerCaptureHudUpdateByPoint.set(pointId, elapsed);
+    return true;
 }
 
 function flagIndex(point: mod.CapturePoint): number {
@@ -498,6 +579,9 @@ function initializePlayerState(player: mod.Player): void {
     current.ignoreOOB = false;
     current.aiTarget = undefined;
     current.aiInAction = false;
+    current.vehicleStartPosition = undefined;
+    current.vehicleEnteredAt = -1;
+    current.aiActionUntil = -1;
 }
 
 function setupScoreboard(): void {
@@ -533,7 +617,24 @@ function scoreRootName(teamValue: mod.Team): string {
     return widgetName(["ConquestHUD", teamValue, "Root"]);
 }
 
-// Creates the team-restricted top HUD. Each team gets its own copy so friendly/enemy colors can be flipped.
+function sharedHudRootName(): string {
+    return "ConquestHUD_Shared_Root";
+}
+
+function createSharedHud(): void {
+    const rootName = sharedHudRootName();
+    if (mod.HasUIWidgetWithName(rootName)) mod.DeleteUIWidget(find(rootName));
+
+    mod.AddUIContainer(rootName, mod.CreateVector(0, 0, 0), mod.CreateVector(2000, 2000, 0), mod.UIAnchor.TopCenter);
+    const root = find(rootName);
+    mod.SetUIWidgetBgFill(root, mod.UIBgFill.None);
+    mod.SetUIWidgetDepth(root, mod.UIDepth.AboveGameUI);
+    addText("ConquestTimer", mod.CreateVector(0, 50, 0), mod.CreateVector(90, 30, 0), root, timeMessage(), 24, WHITE(), BLACK(), 0.8, mod.UIBgFill.Blur);
+    createObjectiveHud(root);
+    updateSharedHud();
+}
+
+// Creates the team-restricted ticket HUD. Shared timer/objective widgets live in the global HUD.
 function createTeamHud(teamValue: mod.Team): void {
     const rootName = scoreRootName(teamValue);
     if (mod.HasUIWidgetWithName(rootName)) mod.DeleteUIWidget(find(rootName));
@@ -543,7 +644,6 @@ function createTeamHud(teamValue: mod.Team): void {
     mod.SetUIWidgetBgFill(root, mod.UIBgFill.None);
     mod.SetUIWidgetDepth(root, mod.UIDepth.AboveGameUI);
 
-    addText("ConquestTimer", mod.CreateVector(0, 50, 0), mod.CreateVector(90, 30, 0), root, timeMessage(), 24, WHITE(), BLACK(), 0.8, mod.UIBgFill.Blur, teamValue);
     addText(
         widgetName(["ConquestScore", teamValue, "Friendly"]),
         mod.CreateVector(-315, 45, 0),
@@ -574,11 +674,10 @@ function createTeamHud(teamValue: mod.Team): void {
     addContainer(widgetName(["ConquestBarBg", teamValue, "Enemy"]), mod.CreateVector(160, 60, 0), mod.CreateVector(200, 10, 0), root, TEAM_2_BG(), 0.8, mod.UIBgFill.Blur, teamValue);
     addContainer(widgetName(["ConquestBar", teamValue, "Friendly"]), mod.CreateVector(-260, 60, 0), mod.CreateVector(200, 10, 0), root, TEAM_1_TEXT(), 1, mod.UIBgFill.Solid, teamValue);
     addContainer(widgetName(["ConquestBar", teamValue, "Enemy"]), mod.CreateVector(260, 60, 0), mod.CreateVector(200, 10, 0), root, TEAM_2_TEXT(), 1, mod.UIBgFill.Solid, teamValue);
-    createObjectiveHud(teamValue, root);
     updateTeamHud(teamValue);
 }
 
-function createObjectiveHud(teamValue: mod.Team, root: mod.UIWidget): void {
+function createObjectiveHud(root: mod.UIWidget): void {
     const points = mod.AllCapturePoints();
     const total = Math.max(1, countPortalArray(points));
 
@@ -586,54 +685,68 @@ function createObjectiveHud(teamValue: mod.Team, root: mod.UIWidget): void {
         const point = portalArrayValue<mod.CapturePoint>(points, i);
         const x = (i - (total - 1) / 2) * 50;
         addText(
-            objectiveWidgetName(teamValue, point, "Text"),
+            objectiveWidgetName(point, "Text"),
             mod.CreateVector(x, 90, 0),
             mod.CreateVector(30, 30, 0),
             root,
             message(flagLetter(point)),
             24,
-            objectiveTextColorForTeam(teamValue, point),
-            objectiveBgColorForTeam(teamValue, point),
+            objectiveTextColor(point),
+            objectiveBgColor(point),
             0.8,
             mod.UIBgFill.Blur,
-            teamValue,
         );
-        addContainer(
-            objectiveWidgetName(teamValue, point, "Outline"),
+        addText(
+            objectiveWidgetName(point, "Outline"),
             mod.CreateVector(x, 90, 0),
-            mod.CreateVector(34, 34, 0),
+            mod.CreateVector(30, 30, 0),
             root,
-            objectiveTextColorForTeam(teamValue, point),
-            0.8,
+            message(""),
+            24,
+            objectiveTextColor(point),
+            objectiveTextColor(point),
+            1,
             mod.UIBgFill.OutlineThin,
-            teamValue,
         );
     }
 }
 
-function objectiveWidgetName(teamValue: mod.Team, point: mod.CapturePoint, suffix: string): string {
-    return widgetName(["ConquestObjective", teamValue, point, suffix]);
+function objectiveWidgetName(point: mod.CapturePoint, suffix: string): string {
+    return widgetName(["ConquestObjective", point, suffix]);
 }
 
-function objectiveTextColorForTeam(teamValue: mod.Team, point: mod.CapturePoint): mod.Vector {
+function objectiveTextColor(point: mod.CapturePoint): mod.Vector {
     const owner = mod.GetCurrentOwnerTeam(point);
-    if (mod.Equals(owner, teamValue)) return TEAM_1_TEXT();
+    if (teamId(owner) === TEAM_1_ID) return TEAM_1_TEXT();
+    if (teamId(owner) === TEAM_2_ID) return TEAM_2_TEXT();
     if (teamId(owner) === NEUTRAL_TEAM_ID) return WHITE();
-    return TEAM_2_TEXT();
+    return WHITE();
 }
 
-function objectiveBgColorForTeam(teamValue: mod.Team, point: mod.CapturePoint): mod.Vector {
+function objectiveBgColor(point: mod.CapturePoint): mod.Vector {
     const owner = mod.GetCurrentOwnerTeam(point);
-    if (mod.Equals(owner, teamValue)) return TEAM_1_BG();
+    if (teamId(owner) === TEAM_1_ID) return TEAM_1_BG();
+    if (teamId(owner) === TEAM_2_ID) return TEAM_2_BG();
     if (teamId(owner) === NEUTRAL_TEAM_ID) return BLACK();
-    return TEAM_2_BG();
+    return BLACK();
 }
 
-function objectiveProgressColorForTeam(teamValue: mod.Team, point: mod.CapturePoint): mod.Vector {
-    const progressTeam = mod.GetOwnerProgressTeam(point);
-    if (mod.Equals(progressTeam, teamValue)) return TEAM_1_TEXT();
-    if (teamId(progressTeam) === NEUTRAL_TEAM_ID) return WHITE();
-    return TEAM_2_TEXT();
+type ObjectiveHudAppearance = {
+    color: mod.Vector;
+    bgColor: mod.Vector;
+    alpha: number;
+    textBgAlpha: number;
+};
+
+function objectiveHudAppearance(point: mod.CapturePoint): ObjectiveHudAppearance {
+    const isChanging = isCapturePointChanging(point);
+    const sharedAlpha = isChanging ? objectiveFlashAlpha() : 1;
+    return {
+        color: objectiveTextColor(point),
+        bgColor: objectiveBgColor(point),
+        alpha: sharedAlpha,
+        textBgAlpha: isChanging ? sharedAlpha : 0.8,
+    };
 }
 
 // Updates one team's view of scores, ticket bars, timer, and objective icons.
@@ -649,41 +762,62 @@ function updateTeamHud(teamValue: mod.Team): void {
     setTextIfPresent(widgetName(["ConquestScore", teamValue, "Enemy"]), message("{}", enemy));
     setWidgetAlphaIfPresent(widgetName(["ConquestScore", teamValue, "Friendly"]), ticketFlashAlpha(teamValue));
     setWidgetAlphaIfPresent(widgetName(["ConquestScore", teamValue, "Enemy"]), ticketFlashAlpha(otherTeam(teamValue)));
-    setTextIfPresent("ConquestTimer", timeMessage(), find(scoreRootName(teamValue)));
     setSizeAndPositionIfPresent(widgetName(["ConquestBar", teamValue, "Friendly"]), mod.CreateVector(friendlyWidth, 10, 0), mod.CreateVector(-260 + friendlyWidth / 2, 60, 0));
     setSizeAndPositionIfPresent(widgetName(["ConquestBar", teamValue, "Enemy"]), mod.CreateVector(enemyWidth, 10, 0), mod.CreateVector(260 - enemyWidth / 2, 60, 0));
-    updateObjectiveHud(teamValue);
 }
 
 function ticketFlashAlpha(scoreTeam: mod.Team): number {
+    if (getTeamScore(scoreTeam) <= LOW_TICKET_MUSIC_THRESHOLD) return Math.max(0.2, captureFlashAlpha());
     if (state.lastBleedTime < 0 || state.lastBleedTeamId !== teamId(scoreTeam)) return 0.8;
     return Math.max(0.8, 1 - (mod.GetMatchTimeElapsed() - state.lastBleedTime) / 1.75);
 }
 
 // Keeps objective letters and small capture-progress bars in sync with the current capture state.
-function updateObjectiveHud(teamValue: mod.Team): void {
+function updateSharedHud(): void {
+    updateTimerHud();
+    updateObjectiveHud();
+}
+
+function updateTimerHud(): void {
+    setTextIfPresent("ConquestTimer", timeMessage(), find(sharedHudRootName()));
+}
+
+function updateObjectiveHud(): void {
     const points = mod.AllCapturePoints();
     const total = Math.max(1, countPortalArray(points));
 
     for (let i = 0; i < total; i += 1) {
         const point = portalArrayValue<mod.CapturePoint>(points, i);
-        const x = (i - (total - 1) / 2) * 50;
-        const progress = mod.GetCaptureProgress(point);
-        const outlineName = objectiveWidgetName(teamValue, point, "Outline");
-        const isChanging = progress > 0 && progress < 1;
-        const textAlpha = isChanging ? objectiveFlashAlpha() : 1;
-        const outlineAlpha = isChanging ? objectiveFlashAlpha() : 0.8;
-        setTextIfPresent(objectiveWidgetName(teamValue, point, "Text"), message(flagLetter(point)));
-        setWidgetColorIfPresent(objectiveWidgetName(teamValue, point, "Text"), objectiveBgColorForTeam(teamValue, point));
-        setTextColorIfPresent(objectiveWidgetName(teamValue, point, "Text"), objectiveTextColorForTeam(teamValue, point));
-        setWidgetColorIfPresent(outlineName, objectiveProgressColorForTeam(teamValue, point));
-        setTextAlphaIfPresent(objectiveWidgetName(teamValue, point, "Text"), textAlpha);
-        setWidgetAlphaIfPresent(outlineName, outlineAlpha);
+        updateObjectiveHudForPoint(point);
     }
 }
 
+function updateObjectiveHudForPoint(point: mod.CapturePoint): void {
+    const outlineName = objectiveWidgetName(point, "Outline");
+    const textName = objectiveWidgetName(point, "Text");
+    const appearance = objectiveHudAppearance(point);
+    setTextIfPresent(textName, message(flagLetter(point)));
+    setWidgetColorIfPresent(textName, appearance.bgColor);
+    setTextColorIfPresent(textName, appearance.color);
+    setTextColorIfPresent(outlineName, appearance.color);
+    setWidgetColorIfPresent(outlineName, appearance.color);
+    setTextAlphaIfPresent(textName, appearance.alpha);
+    setWidgetAlphaIfPresent(textName, appearance.textBgAlpha);
+    setWidgetAlphaIfPresent(outlineName, appearance.alpha);
+}
+
+function isCapturePointChanging(point: mod.CapturePoint): boolean {
+    const progress = mod.GetCaptureProgress(point);
+    return progress > 0 && progress < 1;
+}
+
 function objectiveFlashAlpha(): number {
-    return mod.GetMatchTimeElapsed() % 1;
+    return captureFlashAlpha();
+}
+
+function captureFlashAlpha(): number {
+    const value = mod.GetVariable(capturepointFlashGlobalVar());
+    return typeof value === "number" ? value : 1;
 }
 
 function setTextIfPresent(name: string, msg: mod.Message, root?: mod.UIWidget): void {
@@ -735,6 +869,7 @@ function timeMessage(): mod.Message {
 
 function updateAllHud(): void {
     updateScoreboardHeader();
+    updateSharedHud();
     updateTeamHud(team(TEAM_1_ID));
     updateTeamHud(team(TEAM_2_ID));
 }
@@ -753,9 +888,42 @@ function setupAllCapturePoints(): void {
     for (let i = 0; i < countPortalArray(points); i += 1) setupCapturePoint(portalArrayValue<mod.CapturePoint>(points, i));
 }
 
+function setupCaptureSounds(): void {
+    mod.SetVariable(capturedVoGlobalVar(), spawnVOObject());
+    mod.SetVariable(capturingVoGlobalVar(), spawnVOObject());
+    mod.SetVariable(
+        tickSoundTakingGlobalVar(),
+        spawnSoundObject(mod.RuntimeSpawn_Common.SFX_UI_Gamemode_Shared_CaptureObjectives_CapturingTickIcon_IsFriendly_OneShot2D),
+    );
+    mod.SetVariable(
+        tickSoundLosingGlobalVar(),
+        spawnSoundObject(mod.RuntimeSpawn_Common.SFX_UI_Gamemode_Shared_CaptureObjectives_CapturingTickEnemy_OneShot2D),
+    );
+    mod.SetVariable(
+        capturedSoundGlobalVar(),
+        spawnSoundObject(mod.RuntimeSpawn_Common.SFX_UI_Gamemode_Shared_CaptureObjectives_OnCapturedByFriendly_OneShot2D),
+    );
+    mod.SetVariable(capturepointFlashGlobalVar(), 1);
+}
+
+function spawnVOObject(): mod.VO {
+    return spawnSoundObject(mod.RuntimeSpawn_Common.SFX_VOModule_OneShot2D) as unknown as mod.VO;
+}
+
+function spawnSoundObject(soundSpawn: mod.Any): mod.Object {
+    return mod.SpawnObject(
+        soundSpawn ?? mod.RuntimeSpawn_Common.SFX_VOModule_OneShot2D,
+        mod.CreateVector(0, 0, 0),
+        mod.CreateVector(0, 0, 0),
+        mod.CreateVector(0, 0, 0),
+    );
+}
+
 // Resets all match-scoped state. Customizers can change feature flags here.
 function initializeConquestState(): void {
     playerStates.clear();
+    objectiveHudLoops.clear();
+    lastPlayerCaptureHudUpdateByPoint.clear();
     state.initialized = true;
     state.gameOngoing = false;
     state.enableCustomAI = true;
@@ -775,6 +943,9 @@ function initializeConquestState(): void {
     state.botNameIndex = 0;
     state.lastBleedTeamId = NEUTRAL_TEAM_ID;
     state.lastBleedTime = -1;
+    state.lastHudFlashTick = -1;
+    state.lastCaptureFlashTick = -1;
+    state.captureFlashLoopRunning = false;
 
     if (state.conquestAssault) {
         state.team1StartingScore = ASSAULT_ATTACKER_TICKETS;
@@ -796,11 +967,14 @@ function startConquest(): void {
     mod.SetUnspawnDelayInSeconds(mod.GetSpawner(AI_SPAWNER_TEAM_2), 300);
     setupScoreboard();
     setupAllCapturePoints();
+    createSharedHud();
     createTeamHud(team(TEAM_1_ID));
     createTeamHud(team(TEAM_2_ID));
     mod.LoadMusic(mod.MusicPackages.Core);
     mod.PlayMusic(mod.MusicEvents.Core_LastPhaseBegin);
     state.gameOngoing = true;
+    setupCaptureSounds();
+    startCaptureFlashLoop();
 }
 
 // Applies the ticket bleed rules:
@@ -840,13 +1014,38 @@ function maybeRefreshHud(): void {
     if (!state.gameOngoing) return;
 
     const elapsed = Math.floor(mod.GetMatchTimeElapsed());
-    if (elapsed === state.lastHudTick && !ticketFlashActive()) return;
+    if (elapsed === state.lastHudTick) {
+        if (!ticketFlashActive()) return;
+        const flashTick = Math.floor(mod.GetMatchTimeElapsed() * 10);
+        if (flashTick === state.lastHudFlashTick) return;
+        state.lastHudFlashTick = flashTick;
+    }
     state.lastHudTick = elapsed;
     updateAllHud();
 }
 
+function startCaptureFlashLoop(): void {
+    if (state.captureFlashLoopRunning) return;
+    state.captureFlashLoopRunning = true;
+    void runCaptureFlashLoop();
+}
+
+async function runCaptureFlashLoop(): Promise<void> {
+    let flashStep = 0;
+    while (state.gameOngoing) {
+        mod.SetVariable(capturepointFlashGlobalVar(), flashStep / 10);
+        flashStep = flashStep >= 8 ? 0 : flashStep + 2;
+        await mod.Wait(0.1);
+    }
+    state.captureFlashLoopRunning = false;
+}
+
 function ticketFlashActive(): boolean {
-    return state.lastBleedTime >= 0 && mod.GetMatchTimeElapsed() - state.lastBleedTime < 1.75;
+    return (
+        (state.lastBleedTime >= 0 && mod.GetMatchTimeElapsed() - state.lastBleedTime < 1.75) ||
+        getTeamScore(team(TEAM_1_ID)) <= LOW_TICKET_MUSIC_THRESHOLD ||
+        getTeamScore(team(TEAM_2_ID)) <= LOW_TICKET_MUSIC_THRESHOLD
+    );
 }
 
 // Triggers the low-ticket music only once per match.
@@ -911,6 +1110,7 @@ function awardCapturePlayers(point: mod.CapturePoint): void {
         const player = portalArrayValue<mod.Player>(players, i);
         if (!mod.IsPlayerValid(player) || !mod.Equals(mod.GetTeam(player), owner)) continue;
         addPlayerScore(player, 50, PlayerVar.Captures);
+        mod.PlaySound(mod.GetVariable(capturedSoundGlobalVar()), 0.7, player);
     }
 }
 
@@ -918,7 +1118,7 @@ function awardCapturePlayers(point: mod.CapturePoint): void {
 function playCaptureVO(point: mod.CapturePoint): void {
     if (!state.enableVO) return;
     const owner = mod.GetCurrentOwnerTeam(point);
-    mod.PlayVO(mod.SpawnObject(mod.RuntimeSpawn_Common.SFX_VOModule_OneShot2D, mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0)), mod.VoiceOverEvents2D.ObjectiveCaptured, voiceOverFlag(point), owner);
+    mod.PlayVO(mod.GetVariable(capturedVoGlobalVar()), mod.VoiceOverEvents2D.ObjectiveCaptured, voiceOverFlag(point), owner);
 }
 
 function voiceOverFlag(point: mod.CapturePoint): mod.VoiceOverFlags {
@@ -974,16 +1174,16 @@ function setPlayerOobVisible(player: mod.Player, visible: boolean): void {
 }
 
 // Updates the per-player capture HUD that appears while standing inside an objective.
-function updatePlayerCaptureHud(player: mod.Player, point: mod.CapturePoint): void {
+function updatePlayerCaptureHud(player: mod.Player, point: mod.CapturePoint, occupancy: PointOccupancy): void {
     const progress = mod.GetCaptureProgress(point);
     const width = Math.max(2, Math.floor(220 * progress));
     const rootName = widgetName(["ConquestPlayerHUD", player]);
-    const friendlyCount = countPlayersOnPoint(point, mod.GetTeam(player));
-    const enemyCount = countPlayersOnPoint(point, otherTeam(mod.GetTeam(player)));
+    const friendlyCount = friendlyCountForTeam(occupancy, mod.GetTeam(player));
+    const enemyCount = enemyCountForTeam(occupancy, mod.GetTeam(player));
     const owner = mod.GetCurrentOwnerTeam(point);
     const ownerProgressTeam = mod.GetOwnerProgressTeam(point);
     const playerIsProgressOwner = mod.Equals(ownerProgressTeam, mod.GetTeam(player));
-    const textColor = playerIsProgressOwner ? TEAM_1_TEXT() : mod.Equals(owner, mod.GetTeam(player)) ? TEAM_1_TEXT() : teamId(owner) === NEUTRAL_TEAM_ID ? WHITE() : TEAM_2_TEXT();
+    const textColor = mod.Equals(owner, mod.GetTeam(player)) ? TEAM_1_TEXT() : teamId(owner) === NEUTRAL_TEAM_ID ? WHITE() : TEAM_2_TEXT();
     const label = captureStatusLabel(player, point);
 
     setTextIfPresent(widgetName([rootName, "ObjectiveText"]), message(label));
@@ -991,7 +1191,29 @@ function updatePlayerCaptureHud(player: mod.Player, point: mod.CapturePoint): vo
     setTextColorIfPresent(widgetName([rootName, "ObjectiveText"]), textColor);
     setWidgetColorIfPresent(widgetName([rootName, "ObjectiveProgress"]), playerIsProgressOwner ? TEAM_1_TEXT() : TEAM_2_TEXT());
     setSizeAndPositionIfPresent(widgetName([rootName, "ObjectiveProgress"]), mod.CreateVector(width, 7, 0), mod.CreateVector(-110 + width / 2, 200, 0));
+    playCaptureTickSound(player, point, progress);
     playerState(player).lastCaptureProgress = progress;
+}
+
+function playCaptureTickSound(player: mod.Player, point: mod.CapturePoint, progress: number): void {
+    const current = playerState(player);
+    if (current.lastCaptureProgress === progress) {
+        current.captureTick = 0;
+        return;
+    }
+
+    current.captureTick += 1;
+    if (current.captureTick % CAPTURE_TICK_SOUND_INTERVAL !== 0) return;
+
+    const progressIncreased = progress > current.lastCaptureProgress;
+    const playerIsProgressOwner = mod.Equals(mod.GetTeam(player), mod.GetOwnerProgressTeam(point));
+    const takingSound = mod.GetVariable(tickSoundTakingGlobalVar());
+    const losingSound = mod.GetVariable(tickSoundLosingGlobalVar());
+    if ((progressIncreased && playerIsProgressOwner) || (!progressIncreased && !playerIsProgressOwner)) {
+        mod.PlaySound(takingSound, 0.5, player);
+    } else {
+        mod.PlaySound(losingSound, 0.5, player);
+    }
 }
 
 // Converts the current objective state into the player-facing label.
@@ -1039,13 +1261,39 @@ function nextBotName(): mod.Message {
 function maybeIssueAIOrders(): void {
     if (!state.enableCustomAI) return;
     const elapsed = Math.floor(mod.GetMatchTimeElapsed());
-    if (elapsed === state.lastAIOrderTick || elapsed % 5 !== 0) return;
+    if (elapsed === state.lastAIOrderTick || elapsed % AI_ORDER_INTERVAL_SECONDS !== 0) return;
     state.lastAIOrderTick = elapsed;
 
     const players = mod.AllPlayers();
     for (let i = 0; i < countPortalArray(players); i += 1) {
         const player = portalArrayValue<mod.Player>(players, i);
+        if (!mod.IsPlayerValid(player) || !mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) continue;
+        updateAITimedState(player);
         sendAIToObjective(player);
+    }
+}
+
+function updateAITimedState(player: mod.Player): void {
+    if (!mod.IsPlayerValid(player) || !mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) return;
+    const current = playerState(player);
+    const elapsed = mod.GetMatchTimeElapsed();
+
+    if (current.aiInAction && current.aiActionUntil >= 0 && elapsed >= current.aiActionUntil) {
+        current.aiInAction = false;
+        current.aiActionUntil = -1;
+    }
+
+    if (
+        current.vehicleStartPosition !== undefined &&
+        current.vehicleEnteredAt >= 0 &&
+        elapsed - current.vehicleEnteredAt >= 10 &&
+        mod.GetSoldierState(player, mod.SoldierStateBool.IsInVehicle)
+    ) {
+        if (mod.DistanceBetween(mod.GetObjectPosition(player), current.vehicleStartPosition) < 3) {
+            mod.ForcePlayerExitVehicle(player, mod.GetVehicleFromPlayer(player));
+        }
+        current.vehicleStartPosition = undefined;
+        current.vehicleEnteredAt = -1;
     }
 }
 
@@ -1092,9 +1340,15 @@ function chooseNearestObjective(player: mod.Player): mod.CapturePoint {
 // Sends AI toward an objective after deploy, capture-point entry, vehicle exit, or move failure.
 function sendAIToObjective(player: mod.Player): void {
     if (!mod.IsPlayerValid(player) || !mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) return;
+    if (playerState(player).aiInAction) return;
     const objective = chooseNearestObjective(player);
-    mod.AISetMoveSpeed(player, mod.MoveSpeed.InvestigateRun);
+    playerState(player).aiTarget = objective;
+    mod.AISetMoveSpeed(player, mod.MoveSpeed.Sprint);
     mod.AIMoveToBehavior(player, mod.GetObjectPosition(objective));
+}
+
+function isActiveAI(player: mod.Player): boolean {
+    return mod.IsPlayerValid(player) && mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier) && mod.GetSoldierState(player, mod.SoldierStateBool.IsAlive);
 }
 
 // Conquest Assault support: defenders lose when team 2 owns no objectives.
@@ -1134,8 +1388,14 @@ export function OnPlayerDeployed(eventPlayer: mod.Player): void {
     const current = playerState(eventPlayer);
     current.onPoint = false;
     current.outOfBounds = false;
+    current.currentCapturePointId = -1;
+    current.captureTick = 0;
+    setPlayerObjectiveVisible(eventPlayer, false);
     if (state.givePlayersNVG) mod.AddEquipment(eventPlayer, mod.Gadgets.Mask_NVG);
     sendAIToObjective(eventPlayer);
+    if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
+        mod.SetPlayerIncomingDamageFactor(eventPlayer, 0.5);
+    }
 }
 
 // Portal event: applies death ticket bleed and updates death stats.
@@ -1143,6 +1403,11 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
     void _eventDeathType;
     void _eventWeaponUnlock;
     if (!state.gameOngoing) return;
+    const current = playerState(eventPlayer);
+    current.onPoint = false;
+    current.currentCapturePointId = -1;
+    current.captureTick = 0;
+    setPlayerObjectiveVisible(eventPlayer, false);
     addPlayerScore(eventPlayer, 0, PlayerVar.Deaths);
     addTeamScore(mod.GetTeam(eventPlayer), -1);
     if (mod.IsPlayerValid(eventOtherPlayer)) playerState(eventPlayer).aiTarget = eventOtherPlayer;
@@ -1183,28 +1448,57 @@ export function OnCapturePointCaptured(eventCapturePoint: mod.CapturePoint): voi
 // Portal event: plays the "objective capturing" VO when capture progress starts.
 export function OnCapturePointCapturing(eventCapturePoint: mod.CapturePoint): void {
     if (!state.enableVO) return;
-    mod.PlayVO(mod.SpawnObject(mod.RuntimeSpawn_Common.SFX_VOModule_OneShot2D, mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0)), mod.VoiceOverEvents2D.ObjectiveCapturing, voiceOverFlag(eventCapturePoint), mod.GetOwnerProgressTeam(eventCapturePoint));
+    mod.PlayVO(mod.GetVariable(capturingVoGlobalVar()), mod.VoiceOverEvents2D.ObjectiveCapturing, voiceOverFlag(eventCapturePoint), mod.GetOwnerProgressTeam(eventCapturePoint));
 }
 
 // Portal event: continuously updates player and team objective HUD while a point is active.
 export function OngoingCapturePoint(eventCapturePoint: mod.CapturePoint): void {
-    const players = mod.GetPlayersOnPoint(eventCapturePoint);
-    for (let i = 0; i < countPortalArray(players); i += 1) {
-        const player = portalArrayValue<mod.Player>(players, i);
-        if (mod.IsPlayerValid(player)) updatePlayerCaptureHud(player, eventCapturePoint);
+    if (isCapturePointChanging(eventCapturePoint)) {
+        startObjectiveHudLoop(eventCapturePoint);
+    } else {
+        updateObjectiveHudForPoint(eventCapturePoint);
     }
-    updateObjectiveHud(team(TEAM_1_ID));
-    updateObjectiveHud(team(TEAM_2_ID));
+    if (!shouldUpdatePlayerCaptureHud(eventCapturePoint)) return;
+    const occupancy = pointOccupancy(eventCapturePoint);
+    for (let i = 0; i < countPortalArray(occupancy.players); i += 1) {
+        const player = portalArrayValue<mod.Player>(occupancy.players, i);
+        if (playerCanShowCaptureHud(player)) {
+            setPlayerObjectiveVisible(player, true);
+            updatePlayerCaptureHud(player, eventCapturePoint, occupancy);
+        } else if (mod.IsPlayerValid(player)) {
+            setPlayerObjectiveVisible(player, false);
+        }
+    }
+}
+
+function startObjectiveHudLoop(point: mod.CapturePoint): void {
+    const pointId = mod.GetObjId(point);
+    if (objectiveHudLoops.has(pointId)) return;
+    objectiveHudLoops.add(pointId);
+    void runObjectiveHudLoop(point, pointId);
+}
+
+async function runObjectiveHudLoop(point: mod.CapturePoint, pointId: number): Promise<void> {
+    while (state.gameOngoing && isCapturePointChanging(point)) {
+        updateObjectiveHudForPoint(point);
+        await mod.Wait(0.1);
+    }
+    updateObjectiveHudForPoint(point);
+    objectiveHudLoops.delete(pointId);
 }
 
 // Portal event: shows the player capture HUD when entering an objective.
 export function OnPlayerEnterCapturePoint(eventPlayer: mod.Player, eventCapturePoint: mod.CapturePoint): void {
+    if (!playerCanShowCaptureHud(eventPlayer)) {
+        setPlayerObjectiveVisible(eventPlayer, false);
+        return;
+    }
     const current = playerState(eventPlayer);
     current.onPoint = true;
     current.currentCapturePointId = mod.GetObjId(eventCapturePoint);
     current.lastCaptureProgress = mod.GetCaptureProgress(eventCapturePoint);
     setPlayerObjectiveVisible(eventPlayer, true);
-    updatePlayerCaptureHud(eventPlayer, eventCapturePoint);
+    updatePlayerCaptureHud(eventPlayer, eventCapturePoint, pointOccupancy(eventCapturePoint));
     sendAIToObjective(eventPlayer);
 }
 
@@ -1247,8 +1541,18 @@ export function OnPlayerDamaged(eventPlayer: mod.Player, eventOtherPlayer: mod.P
     void _eventDamageType;
     void _eventWeaponUnlock;
     if (!mod.IsPlayerValid(eventPlayer) || !mod.IsPlayerValid(eventOtherPlayer)) return;
-    if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier) && !mod.Equals(mod.GetTeam(eventPlayer), mod.GetTeam(eventOtherPlayer))) {
-        playerState(eventPlayer).aiTarget = eventOtherPlayer;
+    if (
+        mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier) &&
+        !playerState(eventPlayer).aiInAction &&
+        !mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsInVehicle) &&
+        !mod.Equals(mod.GetTeam(eventPlayer), mod.GetTeam(eventOtherPlayer))
+    ) {
+        const current = playerState(eventPlayer);
+        current.aiInAction = true;
+        current.aiActionUntil = mod.GetMatchTimeElapsed() + 10;
+        current.aiTarget = eventOtherPlayer;
+        mod.AIDefendPositionBehavior(eventPlayer, mod.GetObjectPosition(eventPlayer), 0, 15);
+        mod.AISetMoveSpeed(eventPlayer, mod.MoveSpeed.InvestigateRun);
         mod.AISetTarget(eventPlayer, eventOtherPlayer);
     }
 }
@@ -1256,7 +1560,11 @@ export function OnPlayerDamaged(eventPlayer: mod.Player, eventOtherPlayer: mod.P
 // Portal event: returns AI to battlefield behavior when entering a vehicle.
 export function OnPlayerEnterVehicle(eventPlayer: mod.Player, _eventVehicle: mod.Vehicle): void {
     void _eventVehicle;
-    if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) mod.AIBattlefieldBehavior(eventPlayer);
+    if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
+        mod.AIBattlefieldBehavior(eventPlayer);
+        playerState(eventPlayer).vehicleStartPosition = mod.GetObjectPosition(eventPlayer);
+        playerState(eventPlayer).vehicleEnteredAt = mod.GetMatchTimeElapsed();
+    }
 }
 
 // Portal event: sends AI back toward an objective after leaving a vehicle.
