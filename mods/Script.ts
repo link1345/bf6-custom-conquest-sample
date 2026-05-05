@@ -42,7 +42,7 @@ const CAPTURED_SOUND_GLOBAL_SLOT = 32;
 const CAPTURED_VO_GLOBAL_SLOT = 33;
 const CAPTURING_VO_GLOBAL_SLOT = 39;
 const TICK_SOUND_TAKING_GLOBAL_SLOT = 44;
-const CAPTURE_TICK_SOUND_INTERVAL = 40;
+const CAPTURE_TICK_SOUND_INTERVAL = 10;
 const PLAYER_CAPTURE_HUD_INTERVAL_SECONDS = 0.1;
 const AI_ORDER_INTERVAL_SECONDS = 5;
 
@@ -467,10 +467,12 @@ function countOwnedCapturePoints(owner: mod.Team): number {
 }
 
 type PointOccupancy = {
-    players: mod.Array;
+    players: PlayerCollection;
     team1Count: number;
     team2Count: number;
 };
+
+type PlayerCollection = mod.Array | mod.Player[];
 
 type CaptureProgressHudState = {
     progress: number;
@@ -479,15 +481,23 @@ type CaptureProgressHudState = {
 };
 
 // Counts players from one team on a capture point for the player objective HUD.
-function countPlayersInArray(players: mod.Array, owner: mod.Team): number {
+function countPlayersInArray(players: PlayerCollection, owner: mod.Team): number {
     let count = 0;
 
-    for (let i = 0; i < countPortalArray(players); i += 1) {
-        const player = portalArrayValue<mod.Player>(players, i);
+    for (let i = 0; i < countPlayers(players); i += 1) {
+        const player = playerValue(players, i);
         if (mod.IsPlayerValid(player) && mod.GetSoldierState(player, mod.SoldierStateBool.IsAlive) && mod.Equals(mod.GetTeam(player), owner)) count += 1;
     }
 
     return count;
+}
+
+function countPlayers(players: PlayerCollection): number {
+    return Array.isArray(players) ? players.length : countPortalArray(players);
+}
+
+function playerValue(players: PlayerCollection, index: number): mod.Player {
+    return Array.isArray(players) ? players[index] : portalArrayValue<mod.Player>(players, index);
 }
 
 function pointOccupancy(point: mod.CapturePoint): PointOccupancy {
@@ -527,11 +537,10 @@ function trackedPointOccupancy(point: mod.CapturePoint): PointOccupancy {
         if (current.onPoint && current.currentCapturePointId === pointId && mod.IsPlayerValid(player)) validPlayers.push(player);
     }
 
-    const trackedPlayers = validPlayers as unknown as mod.Array;
     return {
-        players: trackedPlayers,
-        team1Count: countPlayersInArray(trackedPlayers, team(TEAM_1_ID)),
-        team2Count: countPlayersInArray(trackedPlayers, team(TEAM_2_ID)),
+        players: validPlayers,
+        team1Count: countPlayersInArray(validPlayers, team(TEAM_1_ID)),
+        team2Count: countPlayersInArray(validPlayers, team(TEAM_2_ID)),
     };
 }
 
@@ -1528,8 +1537,8 @@ function updatePlayerCaptureHudsForPoint(point: mod.CapturePoint): boolean {
     const progressHud = updateCaptureProgressHud(point);
     const occupancy = trackedPointOccupancy(point);
     let updatedAnyPlayer = false;
-    for (let i = 0; i < countPortalArray(occupancy.players); i += 1) {
-        const player = portalArrayValue<mod.Player>(occupancy.players, i);
+    for (let i = 0; i < countPlayers(occupancy.players); i += 1) {
+        const player = playerValue(occupancy.players, i);
         if (playerCanShowCaptureHud(player)) {
             updatedAnyPlayer = true;
             setPlayerObjectiveVisible(player, true);
