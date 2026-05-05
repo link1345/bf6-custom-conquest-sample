@@ -252,7 +252,9 @@ const state: ConquestState = {
 // Runtime player state for the current match. This replaces Portal variables for values that do not need persistence.
 const playerStates = new Map<number, PlayerState>();
 const objectiveHudLoops = new Set<number>();
-const lastPlayerCaptureHudUpdateByPoint = new Map<number, number>();
+const playerCaptureHudLoops = new Set<number>();
+const playersByCapturePoint = new Map<number, mod.Player[]>();
+const captureProgressHudByPoint = new Map<number, CaptureProgressHudState>();
 
 function defaultPlayerState(): PlayerState {
     return {
@@ -470,6 +472,12 @@ type PointOccupancy = {
     team2Count: number;
 };
 
+type CaptureProgressHudState = {
+    progress: number;
+    progressSize: mod.Vector;
+    progressPosition: mod.Vector;
+};
+
 // Counts players from one team on a capture point for the player objective HUD.
 function countPlayersInArray(players: mod.Array, owner: mod.Team): number {
     let count = 0;
@@ -491,6 +499,67 @@ function pointOccupancy(point: mod.CapturePoint): PointOccupancy {
     };
 }
 
+function captureProgressHud(point: mod.CapturePoint): CaptureProgressHudState {
+    const pointId = mod.GetObjId(point);
+    const existing = captureProgressHudByPoint.get(pointId);
+    if (existing !== undefined) return existing;
+    return updateCaptureProgressHud(point);
+}
+
+function updateCaptureProgressHud(point: mod.CapturePoint): CaptureProgressHudState {
+    const progress = mod.GetCaptureProgress(point);
+    const width = Math.max(2, Math.floor(220 * progress));
+    const stateForPoint = {
+        progress,
+        progressSize: mod.CreateVector(width, 7, 0),
+        progressPosition: mod.CreateVector(-110 + width / 2, 200, 0),
+    };
+    captureProgressHudByPoint.set(mod.GetObjId(point), stateForPoint);
+    return stateForPoint;
+}
+
+function trackedPointOccupancy(point: mod.CapturePoint): PointOccupancy {
+    const pointId = mod.GetObjId(point);
+    const onPoint = playersByCapturePoint.get(pointId) ?? [];
+    const validPlayers: mod.Player[] = [];
+    for (const player of onPoint) {
+        const current = playerState(player);
+        if (current.onPoint && current.currentCapturePointId === pointId && mod.IsPlayerValid(player)) validPlayers.push(player);
+    }
+
+    const trackedPlayers = validPlayers as unknown as mod.Array;
+    return {
+        players: trackedPlayers,
+        team1Count: countPlayersInArray(trackedPlayers, team(TEAM_1_ID)),
+        team2Count: countPlayersInArray(trackedPlayers, team(TEAM_2_ID)),
+    };
+}
+
+function trackPlayerOnPoint(player: mod.Player, point: mod.CapturePoint): void {
+    const pointId = mod.GetObjId(point);
+    const playerId = mod.GetObjId(player);
+    const players = playersByCapturePoint.get(pointId) ?? [];
+    if (!players.some((current) => mod.GetObjId(current) === playerId)) players.push(player);
+    playersByCapturePoint.set(pointId, players);
+}
+
+function untrackPlayerFromPoint(player: mod.Player, pointId: number): void {
+    const players = playersByCapturePoint.get(pointId);
+    if (players === undefined) return;
+    const playerId = mod.GetObjId(player);
+    const remaining = players.filter((current) => mod.GetObjId(current) !== playerId);
+    if (remaining.length > 0) {
+        playersByCapturePoint.set(pointId, remaining);
+    } else {
+        playersByCapturePoint.delete(pointId);
+    }
+}
+
+function untrackPlayerFromCurrentPoint(player: mod.Player): void {
+    const current = playerState(player);
+    if (current.currentCapturePointId >= 0) untrackPlayerFromPoint(player, current.currentCapturePointId);
+}
+
 function friendlyCountForTeam(occupancy: PointOccupancy, teamValue: mod.Team): number {
     return teamId(teamValue) === TEAM_1_ID ? occupancy.team1Count : occupancy.team2Count;
 }
@@ -501,15 +570,6 @@ function enemyCountForTeam(occupancy: PointOccupancy, teamValue: mod.Team): numb
 
 function playerCanShowCaptureHud(player: mod.Player): boolean {
     return mod.IsPlayerValid(player) && mod.GetSoldierState(player, mod.SoldierStateBool.IsAlive);
-}
-
-function shouldUpdatePlayerCaptureHud(point: mod.CapturePoint): boolean {
-    const pointId = mod.GetObjId(point);
-    const elapsed = mod.GetMatchTimeElapsed();
-    const previous = lastPlayerCaptureHudUpdateByPoint.get(pointId);
-    if (previous !== undefined && elapsed - previous < PLAYER_CAPTURE_HUD_INTERVAL_SECONDS) return false;
-    lastPlayerCaptureHudUpdateByPoint.set(pointId, elapsed);
-    return true;
 }
 
 function flagIndex(point: mod.CapturePoint): number {
@@ -923,7 +983,9 @@ function spawnSoundObject(soundSpawn: mod.Any): mod.Object {
 function initializeConquestState(): void {
     playerStates.clear();
     objectiveHudLoops.clear();
-    lastPlayerCaptureHudUpdateByPoint.clear();
+    playerCaptureHudLoops.clear();
+    playersByCapturePoint.clear();
+    captureProgressHudByPoint.clear();
     state.initialized = true;
     state.gameOngoing = false;
     state.enableCustomAI = true;
@@ -1174,9 +1236,8 @@ function setPlayerOobVisible(player: mod.Player, visible: boolean): void {
 }
 
 // Updates the per-player capture HUD that appears while standing inside an objective.
-function updatePlayerCaptureHud(player: mod.Player, point: mod.CapturePoint, occupancy: PointOccupancy): void {
-    const progress = mod.GetCaptureProgress(point);
-    const width = Math.max(2, Math.floor(220 * progress));
+function updatePlayerCaptureHud(player: mod.Player, point: mod.CapturePoint, occupancy: PointOccupancy, progressHud = captureProgressHud(point)): void {
+    const progress = progressHud.progress;
     const rootName = widgetName(["ConquestPlayerHUD", player]);
     const friendlyCount = friendlyCountForTeam(occupancy, mod.GetTeam(player));
     const enemyCount = enemyCountForTeam(occupancy, mod.GetTeam(player));
@@ -1184,13 +1245,13 @@ function updatePlayerCaptureHud(player: mod.Player, point: mod.CapturePoint, occ
     const ownerProgressTeam = mod.GetOwnerProgressTeam(point);
     const playerIsProgressOwner = mod.Equals(ownerProgressTeam, mod.GetTeam(player));
     const textColor = mod.Equals(owner, mod.GetTeam(player)) ? TEAM_1_TEXT() : teamId(owner) === NEUTRAL_TEAM_ID ? WHITE() : TEAM_2_TEXT();
-    const label = captureStatusLabel(player, point);
+    const label = captureStatusLabel(player, point, progress);
 
     setTextIfPresent(widgetName([rootName, "ObjectiveText"]), message(label));
     setTextIfPresent(widgetName([rootName, "ObjectiveCount"]), message("{} - {}", friendlyCount, enemyCount));
     setTextColorIfPresent(widgetName([rootName, "ObjectiveText"]), textColor);
     setWidgetColorIfPresent(widgetName([rootName, "ObjectiveProgress"]), playerIsProgressOwner ? TEAM_1_TEXT() : TEAM_2_TEXT());
-    setSizeAndPositionIfPresent(widgetName([rootName, "ObjectiveProgress"]), mod.CreateVector(width, 7, 0), mod.CreateVector(-110 + width / 2, 200, 0));
+    setSizeAndPositionIfPresent(widgetName([rootName, "ObjectiveProgress"]), progressHud.progressSize, progressHud.progressPosition);
     playCaptureTickSound(player, point, progress);
     playerState(player).lastCaptureProgress = progress;
 }
@@ -1217,9 +1278,8 @@ function playCaptureTickSound(player: mod.Player, point: mod.CapturePoint, progr
 }
 
 // Converts the current objective state into the player-facing label.
-function captureStatusLabel(player: mod.Player, point: mod.CapturePoint): string {
+function captureStatusLabel(player: mod.Player, point: mod.CapturePoint, progress = mod.GetCaptureProgress(point)): string {
     const owner = mod.GetCurrentOwnerTeam(point);
-    const progress = mod.GetCaptureProgress(point);
     if (progress >= 1 && mod.Equals(owner, mod.GetTeam(player))) return "SECURED";
     if (progress >= 1) return "CONTESTED";
     const progressTeam = mod.GetOwnerProgressTeam(point);
@@ -1386,6 +1446,7 @@ export function OnPlayerJoinGame(eventPlayer: mod.Player): void {
 // Portal event: resets temporary player state and gives optional NVG equipment.
 export function OnPlayerDeployed(eventPlayer: mod.Player): void {
     const current = playerState(eventPlayer);
+    untrackPlayerFromCurrentPoint(eventPlayer);
     current.onPoint = false;
     current.outOfBounds = false;
     current.currentCapturePointId = -1;
@@ -1404,6 +1465,7 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
     void _eventWeaponUnlock;
     if (!state.gameOngoing) return;
     const current = playerState(eventPlayer);
+    untrackPlayerFromCurrentPoint(eventPlayer);
     current.onPoint = false;
     current.currentCapturePointId = -1;
     current.captureTick = 0;
@@ -1453,22 +1515,44 @@ export function OnCapturePointCapturing(eventCapturePoint: mod.CapturePoint): vo
 
 // Portal event: continuously updates player and team objective HUD while a point is active.
 export function OngoingCapturePoint(eventCapturePoint: mod.CapturePoint): void {
+    updateCaptureProgressHud(eventCapturePoint);
     if (isCapturePointChanging(eventCapturePoint)) {
         startObjectiveHudLoop(eventCapturePoint);
     } else {
         updateObjectiveHudForPoint(eventCapturePoint);
     }
-    if (!shouldUpdatePlayerCaptureHud(eventCapturePoint)) return;
-    const occupancy = pointOccupancy(eventCapturePoint);
+    startPlayerCaptureHudLoop(eventCapturePoint);
+}
+
+function updatePlayerCaptureHudsForPoint(point: mod.CapturePoint): boolean {
+    const progressHud = updateCaptureProgressHud(point);
+    const occupancy = trackedPointOccupancy(point);
+    let updatedAnyPlayer = false;
     for (let i = 0; i < countPortalArray(occupancy.players); i += 1) {
         const player = portalArrayValue<mod.Player>(occupancy.players, i);
         if (playerCanShowCaptureHud(player)) {
+            updatedAnyPlayer = true;
             setPlayerObjectiveVisible(player, true);
-            updatePlayerCaptureHud(player, eventCapturePoint, occupancy);
+            updatePlayerCaptureHud(player, point, occupancy, progressHud);
         } else if (mod.IsPlayerValid(player)) {
             setPlayerObjectiveVisible(player, false);
         }
     }
+    return updatedAnyPlayer;
+}
+
+function startPlayerCaptureHudLoop(point: mod.CapturePoint): void {
+    const pointId = mod.GetObjId(point);
+    if (playerCaptureHudLoops.has(pointId)) return;
+    playerCaptureHudLoops.add(pointId);
+    void runPlayerCaptureHudLoop(point, pointId);
+}
+
+async function runPlayerCaptureHudLoop(point: mod.CapturePoint, pointId: number): Promise<void> {
+    while (state.gameOngoing && updatePlayerCaptureHudsForPoint(point)) {
+        await mod.Wait(PLAYER_CAPTURE_HUD_INTERVAL_SECONDS);
+    }
+    playerCaptureHudLoops.delete(pointId);
 }
 
 function startObjectiveHudLoop(point: mod.CapturePoint): void {
@@ -1494,18 +1578,22 @@ export function OnPlayerEnterCapturePoint(eventPlayer: mod.Player, eventCaptureP
         return;
     }
     const current = playerState(eventPlayer);
+    untrackPlayerFromCurrentPoint(eventPlayer);
     current.onPoint = true;
     current.currentCapturePointId = mod.GetObjId(eventCapturePoint);
-    current.lastCaptureProgress = mod.GetCaptureProgress(eventCapturePoint);
+    const progressHud = updateCaptureProgressHud(eventCapturePoint);
+    current.lastCaptureProgress = progressHud.progress;
+    trackPlayerOnPoint(eventPlayer, eventCapturePoint);
     setPlayerObjectiveVisible(eventPlayer, true);
-    updatePlayerCaptureHud(eventPlayer, eventCapturePoint, pointOccupancy(eventCapturePoint));
+    updatePlayerCaptureHud(eventPlayer, eventCapturePoint, pointOccupancy(eventCapturePoint), progressHud);
+    startPlayerCaptureHudLoop(eventCapturePoint);
     sendAIToObjective(eventPlayer);
 }
 
 // Portal event: hides the player capture HUD when leaving an objective.
 export function OnPlayerExitCapturePoint(eventPlayer: mod.Player, _eventCapturePoint: mod.CapturePoint): void {
-    void _eventCapturePoint;
     const current = playerState(eventPlayer);
+    untrackPlayerFromPoint(eventPlayer, mod.GetObjId(_eventCapturePoint));
     current.onPoint = false;
     current.currentCapturePointId = -1;
     current.captureTick = 0;

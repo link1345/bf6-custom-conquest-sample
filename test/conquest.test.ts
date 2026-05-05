@@ -96,7 +96,7 @@ function setupPortalMock(): void {
             Equals: ((a: unknown, b: unknown) => objId(a) === objId(b)) as typeof mod.Equals,
             FindUIWidgetWithName: ((name: string) => widgets.get(name) ?? { name }) as typeof mod.FindUIWidgetWithName,
             Floor: Math.floor,
-            GetCaptureProgress: (point: mod.CapturePoint) => (point as unknown as FakePoint).progress,
+            GetCaptureProgress: vi.fn((point: mod.CapturePoint) => (point as unknown as FakePoint).progress) as unknown as typeof mod.GetCaptureProgress,
             GetCurrentOwnerTeam: (point: mod.CapturePoint) => (point as unknown as FakePoint).owner as unknown as mod.Team,
             GetMatchTimeElapsed: () => elapsed,
             GetMatchTimeRemaining: () => remaining,
@@ -429,38 +429,74 @@ describe("Conquest script", () => {
         expect(outlineAlphaCalls.at(-1)?.[1]).toBe(textAlphaCalls.at(-1)?.[1]);
     });
 
-    it("reuses one capture-point player list for every personal HUD update", () => {
+    it("updates personal HUD loops from tracked point players", async () => {
         const player1: FakePlayer = { id: 10, kind: "player", team: teams[1] };
         const player2: FakePlayer = { id: 11, kind: "player", team: teams[1] };
         const enemy: FakePlayer = { id: 20, kind: "player", team: teams[2] };
         const deadEnemy: FakePlayer = { id: 21, kind: "player", team: teams[2], alive: false };
         points[0].players = [player1, player2, enemy, deadEnemy];
+        allPlayers = [player1, player2, enemy, deadEnemy];
         OnPlayerJoinGame(player1 as unknown as mod.Player);
         OnPlayerJoinGame(player2 as unknown as mod.Player);
         OnGameModeStarted();
+        OnPlayerEnterCapturePoint(player1 as unknown as mod.Player, points[0] as unknown as mod.CapturePoint);
+        OnPlayerEnterCapturePoint(player2 as unknown as mod.Player, points[0] as unknown as mod.CapturePoint);
+        OnPlayerEnterCapturePoint(enemy as unknown as mod.Player, points[0] as unknown as mod.CapturePoint);
         vi.mocked(modMock.GetPlayersOnPoint).mockClear();
+        vi.mocked(modMock.SetUITextLabel).mockClear();
 
-        OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
+        waitResolvers.at(-1)?.();
+        await Promise.resolve();
 
-        expect(modMock.GetPlayersOnPoint).toHaveBeenCalledTimes(1);
+        expect(modMock.GetPlayersOnPoint).not.toHaveBeenCalled();
         const countCalls = vi.mocked(modMock.SetUITextLabel).mock.calls.filter(([widget]) => String((widget as FakeWidget).name).endsWith("ObjectiveCount"));
         expect((countCalls.find(([widget]) => (widget as FakeWidget).name === "ConquestPlayerHUD_10_ObjectiveCount")?.[1] as unknown as { args: unknown[] }).args).toEqual([2, 1, undefined]);
         expect((countCalls.find(([widget]) => (widget as FakeWidget).name === "ConquestPlayerHUD_11_ObjectiveCount")?.[1] as unknown as { args: unknown[] }).args).toEqual([2, 1, undefined]);
     });
 
-    it("throttles personal capture HUD updates per objective", () => {
+    it("runs one personal capture HUD wait loop per objective", async () => {
         const player: FakePlayer = { id: 10, kind: "player", team: teams[1] };
         points[0].players = [player];
+        allPlayers = [];
         OnPlayerJoinGame(player as unknown as mod.Player);
         OnGameModeStarted();
+        OnPlayerEnterCapturePoint(player as unknown as mod.Player, points[0] as unknown as mod.CapturePoint);
+        const waitsAfterEnter = waitResolvers.length;
         vi.mocked(modMock.GetPlayersOnPoint).mockClear();
 
         OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
         OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
-        elapsed = 1;
-        OngoingCapturePoint(points[0] as unknown as mod.CapturePoint);
 
-        expect(modMock.GetPlayersOnPoint).toHaveBeenCalledTimes(2);
+        expect(waitResolvers.length).toBe(waitsAfterEnter);
+        expect(modMock.GetPlayersOnPoint).not.toHaveBeenCalled();
+        expect(modMock.Wait).toHaveBeenLastCalledWith(0.1);
+
+        waitResolvers.at(-1)?.();
+        await Promise.resolve();
+
+        expect(waitResolvers.length).toBe(waitsAfterEnter + 1);
+        expect(modMock.GetPlayersOnPoint).not.toHaveBeenCalled();
+    });
+
+    it("continues moving the personal progress bar after the player enters", async () => {
+        const player: FakePlayer = { id: 10, kind: "player", team: teams[1] };
+        points[0].players = [player];
+        points[0].progress = 0.25;
+        allPlayers = [];
+        OnPlayerJoinGame(player as unknown as mod.Player);
+        OnGameModeStarted();
+        OnPlayerEnterCapturePoint(player as unknown as mod.Player, points[0] as unknown as mod.CapturePoint);
+        vi.mocked(modMock.SetUIWidgetSize).mockClear();
+        vi.mocked(modMock.SetUIWidgetPosition).mockClear();
+        vi.mocked(modMock.GetCaptureProgress).mockClear();
+
+        points[0].progress = 0.5;
+        waitResolvers.at(-1)?.();
+        await Promise.resolve();
+
+        expect(modMock.GetCaptureProgress).toHaveBeenCalledTimes(1);
+        expect(modMock.SetUIWidgetSize).toHaveBeenCalledWith(expect.objectContaining({ name: "ConquestPlayerHUD_10_ObjectiveProgress" }), vector(110, 7, 0));
+        expect(modMock.SetUIWidgetPosition).toHaveBeenCalledWith(expect.objectContaining({ name: "ConquestPlayerHUD_10_ObjectiveProgress" }), vector(-55, 200, 0));
     });
 
     it("hides the personal capture HUD for dead players", () => {
