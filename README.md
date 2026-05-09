@@ -20,7 +20,7 @@ It provides the following development features:
 
 ## Questions / Support
 
-If you have questions or feedback, feel free to contact me on the Battlefield Portal Discord server 😄
+If you have questions or feedback, feel free to contact me on the PlumRice Discord server 😄
 
 Please use the appropriate thread/channel for discussions related to this project.
 
