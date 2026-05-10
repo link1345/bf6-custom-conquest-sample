@@ -5,8 +5,6 @@ const TEAM_1_ID = 1;
 const TEAM_2_ID = 2;
 const NEUTRAL_TEAM_ID = 0;
 
-const TEST = 1000;
-
 // Object ID layout used by the original visual script.
 // Capture points are expected to start at 200: A=200, B=201, C=202, and so on.
 const CAPTURE_POINT_BASE_ID = 200;
@@ -913,10 +911,6 @@ function setWidgetAlphaIfPresent(name: string, alpha: number): void {
     if (mod.HasUIWidgetWithName(name)) mod.SetUIWidgetBgAlpha(find(name), alpha);
 }
 
-function setVisibleIfPresent(name: string, visible: boolean): void {
-    if (mod.HasUIWidgetWithName(name)) mod.SetUIWidgetVisible(find(name), visible);
-}
-
 function setSizeAndPositionIfPresent(name: string, size: mod.Vector, position: mod.Vector): void {
     if (!mod.HasUIWidgetWithName(name)) return;
     const widget = find(name);
@@ -1416,10 +1410,6 @@ function sendAIToObjective(player: mod.Player): void {
     playerState(player).aiTarget = objective;
     mod.AISetMoveSpeed(player, mod.MoveSpeed.Sprint);
     mod.AIMoveToBehavior(player, mod.GetObjectPosition(objective));
-}
-
-function isActiveAI(player: mod.Player): boolean {
-    return mod.IsPlayerValid(player) && mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier) && mod.GetSoldierState(player, mod.SoldierStateBool.IsAlive);
 }
 
 // Conquest Assault support: defenders lose when team 2 owns no objectives.
