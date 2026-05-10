@@ -5,6 +5,7 @@ const TEAM_1_ID = 1;
 const TEAM_2_ID = 2;
 const NEUTRAL_TEAM_ID = 0;
 
+const TEST = 1000;
 
 // Object ID layout used by the original visual script.
 // Capture points are expected to start at 200: A=200, B=201, C=202, and so on.
