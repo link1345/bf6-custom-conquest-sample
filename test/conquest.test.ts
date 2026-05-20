@@ -444,14 +444,15 @@ describe("Conquest script", () => {
         OnPlayerEnterCapturePoint(enemy as unknown as mod.Player, points[0] as unknown as mod.CapturePoint);
         vi.mocked(modMock.GetPlayersOnPoint).mockClear();
         vi.mocked(modMock.SetUITextLabel).mockClear();
+        enemy.alive = false;
 
         waitResolvers.at(-1)?.();
         await Promise.resolve();
 
         expect(modMock.GetPlayersOnPoint).not.toHaveBeenCalled();
         const countCalls = vi.mocked(modMock.SetUITextLabel).mock.calls.filter(([widget]) => String((widget as FakeWidget).name).endsWith("ObjectiveCount"));
-        expect((countCalls.find(([widget]) => (widget as FakeWidget).name === "ConquestPlayerHUD_10_ObjectiveCount")?.[1] as unknown as { args: unknown[] }).args).toEqual([2, 1, undefined]);
-        expect((countCalls.find(([widget]) => (widget as FakeWidget).name === "ConquestPlayerHUD_11_ObjectiveCount")?.[1] as unknown as { args: unknown[] }).args).toEqual([2, 1, undefined]);
+        expect((countCalls.find(([widget]) => (widget as FakeWidget).name === "ConquestPlayerHUD_10_ObjectiveCount")?.[1] as unknown as { args: unknown[] }).args).toEqual([2, 0, undefined]);
+        expect((countCalls.find(([widget]) => (widget as FakeWidget).name === "ConquestPlayerHUD_11_ObjectiveCount")?.[1] as unknown as { args: unknown[] }).args).toEqual([2, 0, undefined]);
     });
 
     it("runs one personal capture HUD wait loop per objective", async () => {
@@ -469,7 +470,7 @@ describe("Conquest script", () => {
 
         expect(waitResolvers.length).toBe(waitsAfterEnter);
         expect(modMock.GetPlayersOnPoint).not.toHaveBeenCalled();
-        expect(modMock.Wait).toHaveBeenLastCalledWith(0.1);
+        expect(modMock.Wait).toHaveBeenLastCalledWith(0.25);
 
         waitResolvers.at(-1)?.();
         await Promise.resolve();
@@ -499,6 +500,32 @@ describe("Conquest script", () => {
         expect(modMock.SetUIWidgetPosition).toHaveBeenCalledWith(expect.objectContaining({ name: "ConquestPlayerHUD_10_ObjectiveProgress" }), vector(-55, 200, 0));
     });
 
+    it("skips unchanged personal capture HUD setters on loop ticks", async () => {
+        const player: FakePlayer = { id: 10, kind: "player", team: teams[1] };
+        points[0].players = [player];
+        points[0].progress = 0.25;
+        allPlayers = [];
+        OnPlayerJoinGame(player as unknown as mod.Player);
+        OnGameModeStarted();
+        OnPlayerEnterCapturePoint(player as unknown as mod.Player, points[0] as unknown as mod.CapturePoint);
+        vi.mocked(modMock.SetUITextLabel).mockClear();
+        vi.mocked(modMock.SetUITextColor).mockClear();
+        vi.mocked(modMock.SetUIWidgetBgColor).mockClear();
+        vi.mocked(modMock.SetUIWidgetSize).mockClear();
+        vi.mocked(modMock.SetUIWidgetPosition).mockClear();
+        vi.mocked(modMock.SetUIWidgetVisible).mockClear();
+
+        waitResolvers.at(-1)?.();
+        await Promise.resolve();
+
+        expect(modMock.SetUITextLabel).not.toHaveBeenCalled();
+        expect(modMock.SetUITextColor).not.toHaveBeenCalled();
+        expect(modMock.SetUIWidgetBgColor).not.toHaveBeenCalled();
+        expect(modMock.SetUIWidgetSize).not.toHaveBeenCalled();
+        expect(modMock.SetUIWidgetPosition).not.toHaveBeenCalled();
+        expect(modMock.SetUIWidgetVisible).not.toHaveBeenCalled();
+    });
+
     it("hides the personal capture HUD for dead players", () => {
         const player: FakePlayer = { id: 10, kind: "player", team: teams[1], alive: false };
         points[0].players = [player];
@@ -525,7 +552,7 @@ describe("Conquest script", () => {
         OnPlayerDeployed(player as unknown as mod.Player);
 
         const textVisibilityCalls = vi.mocked(modMock.SetUIWidgetVisible).mock.calls.filter(([widget]) => (widget as FakeWidget).name === "ConquestPlayerHUD_10_ObjectiveText");
-        expect(textVisibilityCalls.map(([, visible]) => visible)).toEqual([false, false]);
+        expect(textVisibilityCalls.map(([, visible]) => visible)).toEqual([false]);
     });
 
     it("briefly makes the losing ticket background opaque when tickets bleed", () => {

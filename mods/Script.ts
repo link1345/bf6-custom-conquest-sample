@@ -42,8 +42,8 @@ const CAPTURED_SOUND_GLOBAL_SLOT = 32;
 const CAPTURED_VO_GLOBAL_SLOT = 33;
 const CAPTURING_VO_GLOBAL_SLOT = 39;
 const TICK_SOUND_TAKING_GLOBAL_SLOT = 44;
-const CAPTURE_TICK_SOUND_INTERVAL = 10;
-const PLAYER_CAPTURE_HUD_INTERVAL_SECONDS = 0.1;
+const CAPTURE_TICK_SOUND_INTERVAL = 5;
+const PLAYER_CAPTURE_HUD_INTERVAL_SECONDS = 0.25;
 const AI_ORDER_INTERVAL_SECONDS = 5;
 
 // HUD colors. The first vector is text/bar color, the second is the background color.
@@ -181,6 +181,13 @@ type PlayerState = {
     onPoint: boolean;
     currentCapturePointId: number;
     lastCaptureProgress: number;
+    lastObjectiveLabel: string;
+    lastObjectiveFriendlyCount: number;
+    lastObjectiveEnemyCount: number;
+    lastObjectiveTextColorKey: number;
+    lastObjectiveProgressColorKey: number;
+    lastObjectiveProgress: number;
+    objectiveHudVisible: boolean;
     captureTick: number;
     outOfBounds: boolean;
     ignoreOOB: boolean;
@@ -267,6 +274,13 @@ function defaultPlayerState(): PlayerState {
         onPoint: false,
         currentCapturePointId: -1,
         lastCaptureProgress: 0,
+        lastObjectiveLabel: "",
+        lastObjectiveFriendlyCount: -1,
+        lastObjectiveEnemyCount: -1,
+        lastObjectiveTextColorKey: -1,
+        lastObjectiveProgressColorKey: -1,
+        lastObjectiveProgress: -1,
+        objectiveHudVisible: false,
         captureTick: 0,
         outOfBounds: false,
         ignoreOOB: false,
@@ -581,6 +595,16 @@ function playerCanShowCaptureHud(player: mod.Player): boolean {
     return mod.IsPlayerValid(player) && mod.GetSoldierState(player, mod.SoldierStateBool.IsAlive);
 }
 
+function resetPlayerCaptureHudCache(player: mod.Player): void {
+    const current = playerState(player);
+    current.lastObjectiveLabel = "";
+    current.lastObjectiveFriendlyCount = -1;
+    current.lastObjectiveEnemyCount = -1;
+    current.lastObjectiveTextColorKey = -1;
+    current.lastObjectiveProgressColorKey = -1;
+    current.lastObjectiveProgress = -1;
+}
+
 function flagIndex(point: mod.CapturePoint): number {
     return mod.GetObjId(point) - CAPTURE_POINT_BASE_ID;
 }
@@ -643,6 +667,8 @@ function initializePlayerState(player: mod.Player): void {
     current.onPoint = false;
     current.currentCapturePointId = -1;
     current.lastCaptureProgress = 0;
+    resetPlayerCaptureHudCache(player);
+    current.objectiveHudVisible = false;
     current.captureTick = 0;
     current.outOfBounds = false;
     current.ignoreOOB = false;
@@ -1218,7 +1244,7 @@ function createPlayerHud(player: mod.Player): void {
     addContainer(widgetName([rootName, "ObjectiveProgress"]), mod.CreateVector(-110, 200, 0), mod.CreateVector(2, 7, 0), root, WHITE(), 1, mod.UIBgFill.Solid, player);
     addText(widgetName([rootName, "OOBShade"]), mod.CreateVector(0, 0, 0), mod.CreateVector(5000, 5000, 0), root, message(""), 24, BLACK(), BLACK(), 0.9, mod.UIBgFill.Blur, player);
     addText(widgetName([rootName, "OOBText"]), mod.CreateVector(0, 470, 0), mod.CreateVector(420, 150, 0), root, message("Return To Combat"), 56, TEAM_2_TEXT(), TEAM_2_BG(), 0.8, mod.UIBgFill.Blur, player);
-    setPlayerObjectiveVisible(player, false);
+    setPlayerObjectiveVisible(player, false, true);
     setPlayerOobVisible(player, false);
 }
 
@@ -1226,11 +1252,14 @@ function playerHudWidget(player: mod.Player, suffix: string): string {
     return widgetName(["ConquestPlayerHUD", player, suffix]);
 }
 
-function setPlayerObjectiveVisible(player: mod.Player, visible: boolean): void {
+function setPlayerObjectiveVisible(player: mod.Player, visible: boolean, force = false): void {
+    const current = playerState(player);
+    if (!force && current.objectiveHudVisible === visible) return;
     for (const suffix of ["ObjectiveText", "ObjectiveCount", "ObjectiveProgressBg", "ObjectiveProgress"]) {
         const name = playerHudWidget(player, suffix);
         if (mod.HasUIWidgetWithName(name)) mod.SetUIWidgetVisible(find(name), visible);
     }
+    current.objectiveHudVisible = visible;
 }
 
 function setPlayerOobVisible(player: mod.Player, visible: boolean): void {
@@ -1244,21 +1273,52 @@ function setPlayerOobVisible(player: mod.Player, visible: boolean): void {
 function updatePlayerCaptureHud(player: mod.Player, point: mod.CapturePoint, occupancy: PointOccupancy, progressHud = captureProgressHud(point)): void {
     const progress = progressHud.progress;
     const rootName = widgetName(["ConquestPlayerHUD", player]);
-    const friendlyCount = friendlyCountForTeam(occupancy, mod.GetTeam(player));
-    const enemyCount = enemyCountForTeam(occupancy, mod.GetTeam(player));
+    const current = playerState(player);
+    const playerTeam = mod.GetTeam(player);
+    const friendlyCount = friendlyCountForTeam(occupancy, playerTeam);
+    const enemyCount = enemyCountForTeam(occupancy, playerTeam);
     const owner = mod.GetCurrentOwnerTeam(point);
     const ownerProgressTeam = mod.GetOwnerProgressTeam(point);
-    const playerIsProgressOwner = mod.Equals(ownerProgressTeam, mod.GetTeam(player));
-    const textColor = mod.Equals(owner, mod.GetTeam(player)) ? TEAM_1_TEXT() : teamId(owner) === NEUTRAL_TEAM_ID ? WHITE() : TEAM_2_TEXT();
+    const playerIsProgressOwner = mod.Equals(ownerProgressTeam, playerTeam);
+    const textColorKey = playerObjectiveTextColorKey(playerTeam, owner);
+    const progressColorKey = playerIsProgressOwner ? TEAM_1_ID : TEAM_2_ID;
     const label = captureStatusLabel(player, point, progress);
 
-    setTextIfPresent(widgetName([rootName, "ObjectiveText"]), message(label));
-    setTextIfPresent(widgetName([rootName, "ObjectiveCount"]), message("{} - {}", friendlyCount, enemyCount));
-    setTextColorIfPresent(widgetName([rootName, "ObjectiveText"]), textColor);
-    setWidgetColorIfPresent(widgetName([rootName, "ObjectiveProgress"]), playerIsProgressOwner ? TEAM_1_TEXT() : TEAM_2_TEXT());
-    setSizeAndPositionIfPresent(widgetName([rootName, "ObjectiveProgress"]), progressHud.progressSize, progressHud.progressPosition);
+    if (current.lastObjectiveLabel !== label) {
+        setTextIfPresent(widgetName([rootName, "ObjectiveText"]), message(label));
+        current.lastObjectiveLabel = label;
+    }
+    if (current.lastObjectiveFriendlyCount !== friendlyCount || current.lastObjectiveEnemyCount !== enemyCount) {
+        setTextIfPresent(widgetName([rootName, "ObjectiveCount"]), message("{} - {}", friendlyCount, enemyCount));
+        current.lastObjectiveFriendlyCount = friendlyCount;
+        current.lastObjectiveEnemyCount = enemyCount;
+    }
+    if (current.lastObjectiveTextColorKey !== textColorKey) {
+        setTextColorIfPresent(widgetName([rootName, "ObjectiveText"]), playerObjectiveTextColor(textColorKey));
+        current.lastObjectiveTextColorKey = textColorKey;
+    }
+    if (current.lastObjectiveProgressColorKey !== progressColorKey) {
+        setWidgetColorIfPresent(widgetName([rootName, "ObjectiveProgress"]), progressColorKey === TEAM_1_ID ? TEAM_1_TEXT() : TEAM_2_TEXT());
+        current.lastObjectiveProgressColorKey = progressColorKey;
+    }
+    if (current.lastObjectiveProgress !== progress) {
+        setSizeAndPositionIfPresent(widgetName([rootName, "ObjectiveProgress"]), progressHud.progressSize, progressHud.progressPosition);
+        current.lastObjectiveProgress = progress;
+    }
     playCaptureTickSound(player, point, progress);
-    playerState(player).lastCaptureProgress = progress;
+    current.lastCaptureProgress = progress;
+}
+
+function playerObjectiveTextColorKey(playerTeam: mod.Team, owner: mod.Team): number {
+    if (mod.Equals(owner, playerTeam)) return TEAM_1_ID;
+    if (teamId(owner) === NEUTRAL_TEAM_ID) return NEUTRAL_TEAM_ID;
+    return TEAM_2_ID;
+}
+
+function playerObjectiveTextColor(colorKey: number): mod.Vector {
+    if (colorKey === TEAM_1_ID) return TEAM_1_TEXT();
+    if (colorKey === TEAM_2_ID) return TEAM_2_TEXT();
+    return WHITE();
 }
 
 function playCaptureTickSound(player: mod.Player, point: mod.CapturePoint, progress: number): void {
@@ -1452,6 +1512,7 @@ export function OnPlayerDeployed(eventPlayer: mod.Player): void {
     current.outOfBounds = false;
     current.currentCapturePointId = -1;
     current.captureTick = 0;
+    resetPlayerCaptureHudCache(eventPlayer);
     setPlayerObjectiveVisible(eventPlayer, false);
     if (state.givePlayersNVG) mod.AddEquipment(eventPlayer, mod.Gadgets.Mask_NVG);
     sendAIToObjective(eventPlayer);
@@ -1470,6 +1531,7 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
     current.onPoint = false;
     current.currentCapturePointId = -1;
     current.captureTick = 0;
+    resetPlayerCaptureHudCache(eventPlayer);
     setPlayerObjectiveVisible(eventPlayer, false);
     addPlayerScore(eventPlayer, 0, PlayerVar.Deaths);
     addTeamScore(mod.GetTeam(eventPlayer), -1);
@@ -1584,6 +1646,7 @@ export function OnPlayerEnterCapturePoint(eventPlayer: mod.Player, eventCaptureP
     current.currentCapturePointId = mod.GetObjId(eventCapturePoint);
     const progressHud = updateCaptureProgressHud(eventCapturePoint);
     current.lastCaptureProgress = progressHud.progress;
+    resetPlayerCaptureHudCache(eventPlayer);
     trackPlayerOnPoint(eventPlayer, eventCapturePoint);
     setPlayerObjectiveVisible(eventPlayer, true);
     updatePlayerCaptureHud(eventPlayer, eventCapturePoint, pointOccupancy(eventCapturePoint), progressHud);
@@ -1598,6 +1661,7 @@ export function OnPlayerExitCapturePoint(eventPlayer: mod.Player, _eventCaptureP
     current.onPoint = false;
     current.currentCapturePointId = -1;
     current.captureTick = 0;
+    resetPlayerCaptureHudCache(eventPlayer);
     setPlayerObjectiveVisible(eventPlayer, false);
 }
 
